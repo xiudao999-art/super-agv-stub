@@ -25,6 +25,43 @@ public enum DeviceRecoveryStrategy
     Abort
 }
 
+/// <summary>
+/// 平台统一异常等级。该等级描述业务影响范围，不直接等同于厂商控制器的告警等级。
+/// </summary>
+public enum RobotErrorSeverity
+{
+    Info,
+    Warning,
+    Error,
+    Critical
+}
+
+/// <summary>
+/// 异常首要责任归属，用于告警路由和运维派单；它不替代最终的事故责任认定。
+/// </summary>
+public enum RobotErrorOwner
+{
+    Unknown,
+    UpstreamSystem,
+    Scheduler,
+    RobotClient,
+    DeviceAdapter,
+    SiteOperator,
+    DeviceVendor
+}
+
+/// <summary>
+/// 实际物理设备返回的原始异常。平台不得用厂商错误码覆盖自己的业务错误码，
+/// 因此这里作为独立对象随平台错误一起保存和上报。
+/// </summary>
+public sealed record PhysicalDeviceError(
+    string DeviceType,
+    string? Vendor = null,
+    string? Model = null,
+    string? DeviceId = null,
+    string? Code = null,
+    string? Message = null);
+
 /// <summary>所有设备调用使用的统一错误，不包含 Socket/JSON 协议字段。</summary>
 public sealed record DeviceError(
     int Code,
@@ -34,7 +71,11 @@ public sealed record DeviceError(
     bool Retryable = false,
     DeviceErrorCategory Category = DeviceErrorCategory.Unknown,
     DeviceRecoveryStrategy RecoveryStrategy = DeviceRecoveryStrategy.None,
-    string? HandlingAdvice = null);
+    string? HandlingAdvice = null,
+    RobotErrorSeverity Severity = RobotErrorSeverity.Error,
+    RobotErrorOwner Owner = RobotErrorOwner.RobotClient,
+    bool? Recoverable = null,
+    PhysicalDeviceError? PhysicalDevice = null);
 
 /// <summary>厂商适配器返回的强类型结果。</summary>
 public sealed record DeviceResult<T>(bool Success, T? Value = default, DeviceError? Error = null,

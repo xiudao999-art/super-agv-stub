@@ -8,6 +8,8 @@ public sealed class ServerActionJournal
 
     public bool TryGet(string actionInstanceId, out ActionEvent? actionEvent) => _latest.TryGetValue(actionInstanceId, out actionEvent);
 
+    public bool Remove(string actionInstanceId) => _latest.TryRemove(actionInstanceId, out _);
+
     public ActionEvent Save(ActionEvent actionEvent)
     {
         _latest[actionEvent.ActionInstanceId] = actionEvent;

@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Kunling.RobotClient.Actions.ServerActions;
 using Kunling.RobotClient.Core.Controller.Templates;
 
@@ -12,6 +13,7 @@ namespace WinFormsApp1.Net;
 public sealed class TcpServer : IAsyncDisposable, IDisposable
 {
     private readonly ConcurrentDictionary<string, RobotSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SentCommandInfo> _sentCommands = new(StringComparer.OrdinalIgnoreCase);
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptTask;
@@ -21,6 +23,7 @@ public sealed class TcpServer : IAsyncDisposable, IDisposable
     public event EventHandler<string>? Log;
     public event EventHandler? RobotsChanged;
     public event EventHandler? ServerStopped;
+    public event EventHandler<ActionAttentionEventArgs>? ActionAttentionRequired;
 
     public void Start(int port)
     {
@@ -53,7 +56,8 @@ public sealed class TcpServer : IAsyncDisposable, IDisposable
     }
 
     public async Task<string> SendCommandAsync(string robotId, string actionType, string actionVersion,
-        ExecutionMode executionMode, string inputJson, int timeoutMs, CancellationToken cancellationToken = default)
+        ExecutionMode executionMode, string inputJson, int timeoutMs,
+        CancellationToken cancellationToken = default, string? reuseActionInstanceId = null)
     {
         if (!_sessions.TryGetValue(robotId, out var session)) throw new InvalidOperationException("机器人未在线。");
         if (!session.Capabilities.Any(x => x.ActionType.Equals(actionType, StringComparison.OrdinalIgnoreCase) && x.ActionVersion == actionVersion))
@@ -62,17 +66,101 @@ public sealed class TcpServer : IAsyncDisposable, IDisposable
         using var inputDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(inputJson) ? "{}" : inputJson);
         var mainAction = inputDoc.RootElement.Deserialize<MainActionMessage>(ServerActionJson.Default)?.MainAction
             ?? throw new InvalidDataException("input.MainAction 不能为空。");
-        MainActionTemplateValidator.EnsureValid(mainAction);
-        using var configDoc = JsonDocument.Parse("{}");
-        var actionId = Guid.NewGuid().ToString("N");
+        if (string.IsNullOrWhiteSpace(reuseActionInstanceId))
+            MainActionTemplateValidator.EnsureValid(mainAction);
+        else
+        {
+            var resumeErrors = MainActionTemplateValidator.ValidateResume(mainAction);
+            if (resumeErrors.Count > 0) throw new InvalidDataException(string.Join(" ", resumeErrors));
+        }
+        using var configDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(reuseActionInstanceId)
+            ? "{}" : "{\"resume\":true}");
+        var actionId = string.IsNullOrWhiteSpace(reuseActionInstanceId)
+            ? Guid.NewGuid().ToString("N") : reuseActionInstanceId;
         var command = new ActionCommand("1.0", ServerMessageTypes.Command, Guid.NewGuid().ToString("N"),
             session.SessionId, robotId, actionId, Guid.NewGuid().ToString("N"), null, null,
             null, actionVersion, executionMode, configDoc.RootElement.Clone(), inputDoc.RootElement.Clone(),
             timeoutMs, DateTimeOffset.UtcNow);
         await session.SendAsync(command, cancellationToken);
+        var sentInfo = new SentCommandInfo(robotId, actionType, actionVersion, executionMode,
+            inputJson, timeoutMs);
+        // Phase 重试复用同一个 actionInstanceId 时保留首次完整 MainAction，不能被剩余 Phase 覆盖。
+        if (string.IsNullOrWhiteSpace(reuseActionInstanceId)) _sentCommands[actionId] = sentInfo;
+        else _sentCommands.TryAdd(actionId, sentInfo);
         WriteLog($"[{robotId}] COMMAND JSON: {JsonSerializer.Serialize(command, ServerActionJson.Default)}");
         WriteLog($"[{robotId}] 下发 {actionType}，actionInstanceId={actionId}");
         return actionId;
+    }
+
+    /// <summary>
+    /// 从失败 phase 开始断点续跑：已经成功的前置 phase 不再下发，失败 phase 成功后
+    /// 继续执行其后的剩余 phase，并保持原 actionInstanceId。
+    /// </summary>
+    public Task<string> RetryCommandAsync(string actionInstanceId, string phaseId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_sentCommands.TryGetValue(actionInstanceId, out var sent))
+            throw new InvalidOperationException($"找不到动作 {actionInstanceId} 的原始下发内容。");
+        if (string.IsNullOrWhiteSpace(phaseId))
+            throw new InvalidOperationException("重试 phaseId 不能为空。禁止无断点地重跑整个 MainAction。");
+        var retryInputJson = CreatePhaseResumeInput(sent.InputJson, phaseId);
+        return SendCommandAsync(sent.RobotId, sent.ActionType, sent.ActionVersion, sent.ExecutionMode,
+            retryInputJson, sent.TimeoutMs, cancellationToken, actionInstanceId);
+    }
+
+    /// <summary>BUSY 拒绝的动作从未开始过，因此允许在机器人空闲后完整重新下发。</summary>
+    public Task<string> RetryRejectedCommandAsync(string actionInstanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_sentCommands.TryGetValue(actionInstanceId, out var sent))
+            throw new InvalidOperationException($"找不到被拒绝请求 {actionInstanceId} 的原始内容。");
+        return SendCommandAsync(sent.RobotId, sent.ActionType, sent.ActionVersion, sent.ExecutionMode,
+            sent.InputJson, sent.TimeoutMs, cancellationToken);
+    }
+
+    public async Task TerminateActionAsync(string actionInstanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_sentCommands.TryGetValue(actionInstanceId, out var sent))
+            throw new InvalidOperationException($"找不到动作 {actionInstanceId} 的原始内容。");
+        if (!_sessions.TryGetValue(sent.RobotId, out var session))
+            throw new InvalidOperationException("机器人未在线。");
+        await session.SendAsync(new TerminateActionRequest("1.0", ServerMessageTypes.TerminateAction,
+            Guid.NewGuid().ToString("N"), session.SessionId, sent.RobotId, actionInstanceId,
+            DateTimeOffset.UtcNow), cancellationToken);
+        WriteLog($"[{sent.RobotId}] 已通知机器人结束保留动作 actionInstanceId={actionInstanceId}");
+    }
+
+    private static string CreatePhaseResumeInput(string inputJson, string phaseId)
+    {
+        var root = JsonNode.Parse(inputJson)?.AsObject()
+            ?? throw new InvalidDataException("原始 MainAction JSON 无效。");
+        var mainAction = root["MainAction"]?.AsObject() ?? root["mainAction"]?.AsObject()
+            ?? throw new InvalidDataException("原始命令缺少 MainAction。");
+        var phases = mainAction["phases"]?.AsArray()
+            ?? throw new InvalidDataException("原始 MainAction 缺少 phases。");
+        // VERIFY_BEFORE_RETRY 可声明安全重入点。例如 verifyLoad 失败不能只重读传感器，
+        // 必须按 retryFromPhaseId=toPick 回到取料位重新夹取。
+        var requestedPhase = phases.FirstOrDefault(x => string.Equals(
+            x?["phaseId"]?.GetValue<string>(), phaseId, StringComparison.OrdinalIgnoreCase));
+        var retryFromPhaseId = requestedPhase?["params"]?["retryFromPhaseId"]?.GetValue<string>();
+        var resumeFromPhaseId = string.IsNullOrWhiteSpace(retryFromPhaseId) ? phaseId : retryFromPhaseId;
+        var start = -1;
+        for (var i = 0; i < phases.Count; i++)
+        {
+            var currentId = phases[i]?["phaseId"]?.GetValue<string>();
+            if (string.Equals(currentId, resumeFromPhaseId, StringComparison.OrdinalIgnoreCase))
+            {
+                start = i;
+                break;
+            }
+        }
+        if (start < 0) throw new InvalidDataException($"原始 MainAction 中找不到安全重入 phase：{resumeFromPhaseId}");
+
+        var remaining = new JsonArray();
+        for (var i = start; i < phases.Count; i++) remaining.Add(phases[i]?.DeepClone());
+        mainAction["phases"] = remaining;
+        return root.ToJsonString(ServerActionJson.Default);
     }
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
@@ -138,11 +226,21 @@ public sealed class TcpServer : IAsyncDisposable, IDisposable
                 else if (type is ServerMessageTypes.ActionEvent or ServerMessageTypes.ActionStatus)
                 {
                     var actionEvent = document.RootElement.Deserialize<ActionEvent>(ServerActionJson.Default)!;
+                    var report = actionEvent.ReportState;
                     session.LastSeen = DateTimeOffset.UtcNow;
-                    session.State = actionEvent.State.ToString();
+                    session.State = report?.RobotState ?? actionEvent.State.ToString();
                     RobotsChanged?.Invoke(this, EventArgs.Empty);
-                    WriteLog($"[{session.RobotId}] {actionEvent.ActionInstanceId} => {actionEvent.State}" +
-                             (actionEvent.Error is null ? "" : $"，错误 {actionEvent.Error.Code}: {actionEvent.Error.Message}"));
+                    WriteLog(report is null
+                        ? $"[{session.RobotId}] {actionEvent.ActionInstanceId} => {actionEvent.State}" +
+                          (actionEvent.Error is null ? "" : $"，错误 {actionEvent.Error.Code}: {actionEvent.Error.Message}")
+                        : $"[{report.RobotName}] robot={report.RobotState} " +
+                          $"action={report.MainAction.Name}/{report.MainAction.State} " +
+                          $"actionInstanceId={report.ActionInstanceId} " +
+                          $"subAction={report.SubAction?.Name ?? "-"}/{report.SubAction?.State ?? "-"}" +
+                          (report.SubAction?.Code is null ? "" :
+                              $" code={report.SubAction.Code} msg={report.SubAction.Msg}"));
+                    if (actionEvent.State is MainActionState.Busy or MainActionState.Error or MainActionState.Hang)
+                        ActionAttentionRequired?.Invoke(this, new ActionAttentionEventArgs(session.RobotId, actionEvent));
                 }
                 else WriteLog($"[{session.RobotId}] 收到 {type ?? "未知消息"}");
             }
@@ -189,6 +287,11 @@ public sealed class TcpServer : IAsyncDisposable, IDisposable
         public ValueTask DisposeAsync() { client.Dispose(); _sendLock.Dispose(); return ValueTask.CompletedTask; }
     }
 }
+
+public sealed record SentCommandInfo(string RobotId, string ActionType, string ActionVersion,
+    ExecutionMode ExecutionMode, string InputJson, int TimeoutMs);
+
+public sealed record ActionAttentionEventArgs(string RobotId, ActionEvent ActionEvent);
 
 public sealed record RobotSessionInfo(string RobotId, string RemoteEndPoint, string SessionId,
     string RobotType, string Capabilities, string State, DateTimeOffset LastSeen);

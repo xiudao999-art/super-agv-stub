@@ -1,4 +1,5 @@
 using Kunling.RobotClient.Core.Abstractions;
+using Kunling.RobotClient.Core.Controller.Templates;
 using Kunling.RobotClient.Core.Models;
 using RobotLibrarys;
 
@@ -244,12 +245,12 @@ public sealed class HuayanRobot : RobotAPI, IArm, IDisposable, IAsyncDisposable
     /// PICK 是由多个 L1 子动作组成的 L2 主动作，禁止在设备层硬编码；由通用模板执行器逐 phase 调用本适配器。
     /// </summary>
     public Task<DeviceResult<ArmActionResult>> PickAsync(ArmPickRequest request, CancellationToken ct) =>
-        Task.FromResult(DeviceResult<ArmActionResult>.Fail(new DeviceError(4004,
+        Task.FromResult(DeviceResult<ArmActionResult>.Fail(new DeviceError(PlatformErrorCodes.UnsupportedAction,
             "ARM.PICK 必须由 ARM.PICK.Templates.json 展开后执行。", Model)));
 
     /// <summary>PLACE 与 PICK 相同，必须由对应动作模板展开，设备适配器只执行单设备原子子动作。</summary>
     public Task<DeviceResult<ArmActionResult>> PlaceAsync(ArmPlaceRequest request, CancellationToken ct) =>
-        Task.FromResult(DeviceResult<ArmActionResult>.Fail(new DeviceError(4004,
+        Task.FromResult(DeviceResult<ArmActionResult>.Fail(new DeviceError(PlatformErrorCodes.UnsupportedAction,
             "ARM.PLACE 必须由 ARM.PLACE.Templates.json 展开后执行。", Model)));
 
     /// <summary>

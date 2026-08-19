@@ -102,8 +102,8 @@
           "enabled": true,
           "params": {
             "graspProfile": "DEFAULT_PICK",
-            "gripWidthMm": 85.5,
-            "targetWidthMm": 85.5,
+            "gripWidthMm": 25.0,
+            "targetWidthMm": 25.0,
             "gripForceLevel": "MID",
             "gripForce": 35.0,
             "holdMs": 150,

@@ -6,7 +6,7 @@ using Kunling.RobotClient.Core.Models;
 namespace Kunling.RobotClient.Core.Controller;
 
 /// <summary>L2 动作入口；动作行为全部来自对应 Templates.json。</summary>
-public sealed class RobotController : IRobotOperations
+public sealed class RobotController : IRobotOperations, IRobotExecutionProgressSource
 {
     private readonly string _robotId;
     private readonly IChassis _chassis;
@@ -14,6 +14,13 @@ public sealed class RobotController : IRobotOperations
     private readonly ActionTemplateCatalog _templates;
     private readonly ActionTemplateExecutor _executor;
     private readonly IRobotEventSink? _events;
+
+    /// <summary>转发模板执行器产生的实时 phase 状态。</summary>
+    public event EventHandler<OperationStep>? StepChanged
+    {
+        add => _executor.StepChanged += value;
+        remove => _executor.StepChanged -= value;
+    }
 
     public RobotController(string robotId, IChassis chassis, IArm arm, IVision vision, IGripper gripper,
         IRfidReader rfid, IDoor door, ActionTemplateCatalog templates,
@@ -257,7 +264,7 @@ public sealed class RobotController : IRobotOperations
         if (slots.Count == 0) return new(4000, "slots 不能为空。");
         var duplicate = slots.GroupBy(x => x.SlotId, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault(x => x.Count() > 1);
-        return duplicate is null ? null : new DeviceError(4000, $"slotId 重复：{duplicate.Key}");
+        return duplicate is null ? null : new DeviceError(PlatformErrorCodes.InvalidActionInput, $"slotId 重复：{duplicate.Key}");
     }
 
     /// <summary>
@@ -341,7 +348,7 @@ public sealed class RobotController : IRobotOperations
         if (action is null) return new(4000, "MainAction 不能为空。");
         if (action.ActionType != expected)
             return new(4000, $"MainAction.actionType 必须是 {expected.ToActionType()}。");
-        return action.Phases.Count == 0 ? new DeviceError(4000, "MainAction.phases 不能为空。") : null;
+        return action.Phases.Count == 0 ? new DeviceError(PlatformErrorCodes.InvalidActionInput, "MainAction.phases 不能为空。") : null;
     }
 
     private async ValueTask EmitAsync(string eventType, object data, CancellationToken ct)

@@ -25,3 +25,12 @@ public interface IRobotOperations
     Task<DeviceResult<ArmActionResult>> HomeAsync(CancellationToken cancellationToken);
     Task<DeviceResult<VisionResult>> CaptureAsync(VisionRequest request, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// 机器人主动作执行进度源。每完成一次 phase 尝试（包括失败、复核、跳过）即发布快照，
+/// 供通信层缓存当前 Action/SubAction 状态并实时上报服务器。
+/// </summary>
+public interface IRobotExecutionProgressSource
+{
+    event EventHandler<OperationStep>? StepChanged;
+}

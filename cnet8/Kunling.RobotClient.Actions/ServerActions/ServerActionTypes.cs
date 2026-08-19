@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Kunling.RobotClient.Core.Controller.Templates;
+using Kunling.RobotClient.Core.Controller.ReportStateModels;
 using Kunling.RobotClient.Core.Models;
 
 namespace Kunling.RobotClient.Actions.ServerActions;
@@ -16,13 +17,11 @@ public static class ServerMessageTypes
     public const string QueryAction = "QUERY_ACTION";
     public const string ActionStatus = "ACTION_STATUS";
     public const string StateReport = "STATE_REPORT";
+    public const string TerminateAction = "TERMINATE_ACTION";
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ExecutionMode { Atomic, Package }
-
-[JsonConverter(typeof(JsonStringEnumConverter))]
-public enum ClientActionState { Accepted, Running, PhysicalDone, Failed, Unknown, Cancelled }
 
 public sealed record DeviceDescriptor(
     string Category,
@@ -115,7 +114,21 @@ public sealed record ActionError(int Code, string Message, string? DeviceCode = 
     bool PhysicalResultKnown = true, bool Retryable = false,
     DeviceErrorCategory Category = DeviceErrorCategory.Unknown,
     DeviceRecoveryStrategy RecoveryStrategy = DeviceRecoveryStrategy.None,
-    string? HandlingAdvice = null);
+    string? HandlingAdvice = null,
+    ActionFailureContext? Context = null,
+    UnifiedRobotErrorModel? Detail = null);
+
+/// <summary>机器人忙碌或 Phase 失败时回传的结构化执行现场。</summary>
+public sealed record ActionFailureContext(
+    string ActionInstanceId,
+    string ActionType,
+    string? TemplateId = null,
+    string? PhaseId = null,
+    string? SubAction = null,
+    PhaseFailAction? OnFail = null,
+    IReadOnlyList<string>? UserChoices = null,
+    MainActionState? MainActionState = null,
+    string? SubActionState = null);
 
 public sealed record ActionEvent(
     string Version,
@@ -126,13 +139,16 @@ public sealed record ActionEvent(
     string ActionInstanceId,
     string DeviceCommandId,
     long Sequence,
-    ClientActionState State,
+    MainActionState State,
     IReadOnlyList<ResolvedStep>? ResolvedSteps,
     JsonElement? PhysicalResult,
     ActionError? Error,
-    DateTimeOffset Timestamp);
+    DateTimeOffset Timestamp,
+    ReportRobotStateModel? ReportState = null);
 
 public sealed record QueryActionRequest(string Version, string MessageType, string MessageId, string SessionId, string RobotId, string ActionInstanceId, string DeviceCommandId);
+public sealed record TerminateActionRequest(string Version, string MessageType, string MessageId,
+    string SessionId, string RobotId, string ActionInstanceId, DateTimeOffset Timestamp);
 
 public sealed record PingMessage(string Version, string MessageType, string MessageId, string SessionId, string RobotId, long Sequence, RobotStateSnapshot Snapshot, DateTimeOffset Timestamp);
 public sealed record PongMessage(string Version, string MessageType, string MessageId, string ReplyTo, string SessionId, long Sequence, DateTimeOffset ServerTime);

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Kunling.RobotClient.Core.Controller.Templates;
 
 namespace Kunling.RobotClient.Actions.ServerActions;
 
@@ -16,23 +17,29 @@ public interface IServerActionExecutor
 }
 
 public sealed record ServerActionExecutionResult(
-    ClientActionState State,
+    MainActionState State,
     JsonElement? PhysicalResult = null,
     IReadOnlyList<ResolvedStep>? ResolvedSteps = null,
     ActionError? Error = null)
 {
     public static ServerActionExecutionResult PhysicalDone(object? result = null, IReadOnlyList<ResolvedStep>? steps = null) =>
-        new(ClientActionState.PhysicalDone, result is null ? null : JsonSerializer.SerializeToElement(result, ServerActionJson.Default), steps);
+        new(MainActionState.Finished, result is null ? null : JsonSerializer.SerializeToElement(result, ServerActionJson.Default), steps);
 
     public static ServerActionExecutionResult Failed(int code, string message, bool physicalResultKnown = true, string? deviceCode = null) =>
-        new(ClientActionState.Failed, Error: new ActionError(code, message, deviceCode, physicalResultKnown));
+        new(MainActionState.Error, Error: new ActionError(code, message, deviceCode, physicalResultKnown));
 
     public static ServerActionExecutionResult Unknown(int code, string message) =>
-        new(ClientActionState.Unknown, Error: new ActionError(code, message, PhysicalResultKnown: false));
+        new(MainActionState.Hang, Error: new ActionError(code, message, PhysicalResultKnown: false));
+
+    public static ServerActionExecutionResult Busy(string message, ActionFailureContext context) =>
+        new(MainActionState.Busy, Error: new ActionError(PlatformErrorCodes.RobotBusy, message, PhysicalResultKnown: true,
+            Retryable: true, Category: Kunling.RobotClient.Core.Models.DeviceErrorCategory.State,
+            RecoveryStrategy: Kunling.RobotClient.Core.Models.DeviceRecoveryStrategy.WaitAndRetry,
+            HandlingAdvice: "机器人正在执行其他动作，请等待当前动作结束后重试。", Context: context));
 }
 
 public sealed record ServerActionQueryResult(
-    ClientActionState State,
+    MainActionState State,
     JsonElement? PhysicalResult = null,
     IReadOnlyList<ResolvedStep>? ResolvedSteps = null,
     ActionError? Error = null);
@@ -48,21 +55,26 @@ public interface IRobotSnapshotProvider
 /// </summary>
 public interface IRobotActivitySnapshotProvider : IRobotSnapshotProvider
 {
-    void SetCurrentAction(string? actionInstanceId);
+    void SetCurrentAction(string? actionInstanceId, string? state = null);
 }
 
 public sealed class DefaultRobotSnapshotProvider : IRobotActivitySnapshotProvider
 {
     private string? _currentAction;
+    private string? _state;
 
-    public void SetCurrentAction(string? actionInstanceId) =>
+    public void SetCurrentAction(string? actionInstanceId, string? state = null)
+    {
         Interlocked.Exchange(ref _currentAction, actionInstanceId);
+        Interlocked.Exchange(ref _state, state);
+    }
 
     public ValueTask<RobotStateSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
     {
         var currentAction = Volatile.Read(ref _currentAction);
+        var state = Volatile.Read(ref _state);
         return ValueTask.FromResult(new RobotStateSnapshot(
-            currentAction is null ? "IDLE" : "EXECUTING",
+            currentAction is null ? "IDLE" : state ?? "EXECUTING",
             Battery: null,
             Emergency: false,
             ChassisConnected: true,

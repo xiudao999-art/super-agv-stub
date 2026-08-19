@@ -26,6 +26,7 @@ public partial class Form1 : Form
         _server.Log += (_, message) => AppendLog(message);
         _server.RobotsChanged += (_, _) => RefreshRobots();
         _server.ServerStopped += (_, _) => SetRunning(false);
+        _server.ActionAttentionRequired += Server_ActionAttentionRequired;
         cboAction.Items.AddRange(["MOVE", "ARM.PICK", "ARM.PLACE", "ARM.PICK_BATCH", "ARM.PLACE_BATCH", "ARM.HOME", "VISION.CAPTURE"]);
         cboAction.SelectedIndexChanged += (_, _) => SetActionInputExample();
         cboAction.SelectedIndex = 0;
@@ -44,6 +45,118 @@ public partial class Form1 : Form
     }
 
     private async void btnStop_Click(object? sender, EventArgs e) => await _server.StopAsync();
+
+    private void Server_ActionAttentionRequired(object? sender, ActionAttentionEventArgs e)
+    {
+        if (InvokeRequired) { BeginInvoke(() => Server_ActionAttentionRequired(sender, e)); return; }
+        var actionEvent = e.ActionEvent;
+        var error = actionEvent.Error;
+        var context = error?.Context;
+        var report = actionEvent.ReportState;
+        var isBusy = actionEvent.State == MainActionState.Busy;
+        var canRetry = context?.UserChoices?.Any(x =>
+            x.StartsWith("RETRY", StringComparison.OrdinalIgnoreCase)) == true;
+        var robotState = report?.RobotState ??
+                         (isBusy ? "EXECUTING" : actionEvent.State.ToString().ToUpperInvariant());
+        // 使用反射读取本次新增的可选字段，使界面在调试期间误加载旧版 Actions DLL 时
+        // 也只回退显示状态，而不会因 MissingMethodException 导致整个 TCP 会话断开。
+        var reportedMainActionState = GetOptionalContextProperty(context, "MainActionState");
+        var reportedSubActionState = GetOptionalContextProperty(context, "SubActionState");
+        var mainActionState = report?.MainAction.State.ToString().ToUpperInvariant()
+                              ?? reportedMainActionState?.ToUpperInvariant()
+                              ?? (isBusy ? "RUNNING" : actionEvent.State.ToString().ToUpperInvariant());
+        var activeActionId = report?.ActionInstanceId ?? context?.ActionInstanceId ?? actionEvent.ActionInstanceId;
+        var subActionName = report?.SubAction?.Name ?? context?.SubAction ?? "-";
+        var subActionState = report?.SubAction?.State ?? reportedSubActionState ?? "-";
+        var phaseId = report?.SubAction?.PhaseId ?? context?.PhaseId ?? "-";
+        var onFail = report?.SubAction?.OnFail ?? context?.OnFail?.ToString() ?? "-";
+        var unifiedError = report?.SubAction?.Error ?? error?.Detail;
+        var code = unifiedError?.Code.ToString() ?? error?.Code.ToString() ?? "-";
+        var msg = unifiedError?.Message ?? report?.SubAction?.Msg ?? error?.Message ?? "-";
+        var physical = unifiedError?.PhysicalDevice;
+        var detail =
+            $"机器人名称：{report?.RobotName ?? e.RobotId}\r\n" +
+            $"机器人状态：{robotState}\r\n\r\n" +
+            $"正在执行的 ActionInstanceId：{activeActionId}\r\n\r\n" +
+            $"MainAction 名称：{report?.MainAction.Name ?? context?.ActionType ?? "UNKNOWN"}\r\n" +
+            $"MainAction 状态：{mainActionState}\r\n\r\n" +
+            $"正在执行的 SubAction 名称：{subActionName}\r\n" +
+            $"正在执行的 SubAction 状态：{subActionState}\r\n" +
+            $"PhaseId：{phaseId}\r\n" +
+            $"onFail：{onFail}\r\n" +
+            $"平台异常 code：{code}\r\n" +
+            $"平台异常 msg：{msg}\r\n" +
+            (unifiedError is null ? string.Empty :
+                $"异常等级：{unifiedError.Severity}\r\n" +
+                $"异常分类：{unifiedError.Category}\r\n" +
+                $"实际设备：{physical?.DeviceType}/{physical?.Vendor}/{physical?.Model}\r\n" +
+                $"设备异常 code：{physical?.Code ?? "-"}\r\n" +
+                $"设备异常 msg：{physical?.Message ?? "-"}\r\n" +
+                $"可恢复：{unifiedError.Recoverable}\r\n" +
+                $"允许自动重试：{unifiedError.Retryable}\r\n" +
+                $"责任方：{unifiedError.Owner}\r\n" +
+                $"恢复策略：{unifiedError.RecoveryStrategy}\r\n" +
+                $"Phase 失败策略：{unifiedError.FailureStrategy}\r\n" +
+                $"处理建议：{unifiedError.HandlingAdvice ?? "-"}\r\n") +
+            (isBusy ? $"本次被拒绝的 ActionInstanceId：{actionEvent.ActionInstanceId}\r\n" : string.Empty) +
+            "\r\n" +
+                     (isBusy
+                         ? "重新下发只针对本次被拒绝的请求；放弃本次请求不会停止正在执行的动作。"
+                         : canRetry
+                             ? "重试将从失败 Phase 开始，并继续后续 Phase；已经成功的前置 Phase 不会重复执行。"
+                             : "当前 onFail 不允许重试，失败动作已结束。 ");
+        using var dialog = new ActionAttentionDialog(detail, canRetry,
+            isBusy ? "重新下发本次请求" : "重试失败 Phase",
+            isBusy ? "放弃本次请求" : "结束失败动作");
+        var choice = dialog.ShowDialog(this);
+        if (choice == DialogResult.Retry)
+            _ = RetryFromAttentionAsync(actionEvent.ActionInstanceId, phaseId, isBusy);
+        else if (isBusy)
+            AppendLog($"[{e.RobotId}] 放弃本次被拒绝的请求 actionInstanceId={actionEvent.ActionInstanceId}，当前动作继续执行");
+        else
+            _ = TerminateFromAttentionAsync(actionEvent.ActionInstanceId, e.RobotId);
+    }
+
+    private async Task TerminateFromAttentionAsync(string actionInstanceId, string robotId)
+    {
+        try
+        {
+            await _server.TerminateActionAsync(actionInstanceId);
+            AppendLog($"[{robotId}] 结束失败动作且不再重试 actionInstanceId={actionInstanceId}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "结束动作失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>
+    /// 调试期间服务器进程可能仍占用旧版协议程序集。可选字段通过反射读取，旧程序集
+    /// 没有该属性时返回 null；重启并加载新版 DLL 后会自动得到真实值。
+    /// </summary>
+    private static string? GetOptionalContextProperty(ActionFailureContext? context, string propertyName)
+    {
+        if (context is null) return null;
+        try { return context.GetType().GetProperty(propertyName)?.GetValue(context)?.ToString(); }
+        catch (MissingMethodException) { return null; }
+    }
+
+    private async Task RetryFromAttentionAsync(string actionInstanceId, string phaseId, bool isBusy)
+    {
+        try
+        {
+            var newActionId = isBusy
+                ? await _server.RetryRejectedCommandAsync(actionInstanceId)
+                : await _server.RetryCommandAsync(actionInstanceId, phaseId);
+            AppendLog(isBusy
+                ? $"重新下发被拒绝请求，原 actionInstanceId={actionInstanceId}，新 actionInstanceId={newActionId}"
+                : $"从 phase={phaseId} 断点重试，actionInstanceId 保持不变：{newActionId}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "重试失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
 
     private async void btnSend_Click(object? sender, EventArgs e)
     {

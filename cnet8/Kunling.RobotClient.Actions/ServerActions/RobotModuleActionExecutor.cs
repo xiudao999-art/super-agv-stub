@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using Kunling.RobotClient.Core.Abstractions;
 using Kunling.RobotClient.Core.Controller.Actions;
+using Kunling.RobotClient.Core.Controller.ReportStateModels;
 using Kunling.RobotClient.Core.Controller.Templates;
 using Kunling.RobotClient.Core.Models;
 
@@ -22,14 +23,39 @@ public sealed class RobotModuleActionExecutor : IServerActionExecutor
     public async Task<ServerActionExecutionResult> ExecuteAsync(IServerActionExecutionContext context, CancellationToken cancellationToken)
     {
         var command = context.Command;
-        _states[command.ActionInstanceId] = new(ClientActionState.Running);
+        _states[command.ActionInstanceId] = new(MainActionState.Running);
+        var liveSteps = new List<ResolvedStep>();
+        var liveStepsLock = new object();
+
+        // Core 每产生一个 phase 状态，就立即更新本地查询缓存并向服务器发送 Running 快照。
+        // 事件是同步产生的，因此这里只复制不可变快照；网络发送异步执行且自行吞掉断线异常，
+        // 不能反向阻塞或破坏设备动作线程。
+        void OnStepChanged(object? _, OperationStep step)
+        {
+            IReadOnlyList<ResolvedStep> snapshot;
+            lock (liveStepsLock)
+            {
+                liveSteps.Add(ConvertStep(step));
+                snapshot = liveSteps.ToArray();
+                _states[command.ActionInstanceId] = new(MainActionState.Running, ResolvedSteps: snapshot);
+            }
+            _ = ReportProgressSafelyAsync(context, snapshot, cancellationToken);
+        }
+
+        var progressSource = _robot as IRobotExecutionProgressSource;
+        if (progressSource is not null) progressSource.StepChanged += OnStepChanged;
         ServerActionExecutionResult converted;
         try
         {
             // COMMAND 外层不再包含 actionType，业务路由唯一取自 input.MainAction.actionType。
             var embeddedAction = ReadMainActionType(command.Input);
             var receivedTemplate = ParseRequired<MainActionMessage>(command.Input).MainAction;
-            var templateErrors = MainActionTemplateValidator.Validate(receivedTemplate);
+            var isResume = command.ConfigSnapshot.ValueKind == JsonValueKind.Object &&
+                           command.ConfigSnapshot.TryGetProperty("resume", out var resumeElement) &&
+                           resumeElement.ValueKind == JsonValueKind.True;
+            var templateErrors = isResume
+                ? MainActionTemplateValidator.ValidateResume(receivedTemplate)
+                : MainActionTemplateValidator.Validate(receivedTemplate);
             if (templateErrors.Count > 0)
                 throw new ArgumentException(
                     $"MainAction 模板安全校验失败：{string.Join(" ", templateErrors)}");
@@ -37,58 +63,98 @@ public sealed class RobotModuleActionExecutor : IServerActionExecutor
                 {
                     // 从 input.MainAction 反序列化具体 MOVE 主动作，再按其中 phases 调用设备。
                     MainAction.Move => Convert(await _robot.ExecuteMoveAsync(
-                        ParseRequired<MoveActionMessage>(command.Input).MainAction, cancellationToken)),
+                        ParseRequired<MoveActionMessage>(command.Input).MainAction, cancellationToken), command, receivedTemplate),
                     MainAction.ArmPick => Convert(await _robot.ExecutePickAsync(
-                        receivedTemplate, cancellationToken)),
+                        receivedTemplate, cancellationToken), command, receivedTemplate),
                     MainAction.ArmPlace => Convert(await _robot.ExecutePlaceAsync(
-                        receivedTemplate, cancellationToken)),
+                        receivedTemplate, cancellationToken), command, receivedTemplate),
                     MainAction.ArmPickBatch => Convert(await _robot.ExecutePickBatchAsync(
-                        receivedTemplate, cancellationToken)),
+                        receivedTemplate, cancellationToken), command, receivedTemplate),
                     MainAction.ArmPlaceBatch => Convert(await _robot.ExecutePlaceBatchAsync(
-                        receivedTemplate, cancellationToken)),
+                        receivedTemplate, cancellationToken), command, receivedTemplate),
                     MainAction.ArmHome => Convert(await _robot.ExecuteHomeAsync(
-                        receivedTemplate, cancellationToken)),
+                        receivedTemplate, cancellationToken), command, receivedTemplate),
                     MainAction.VisionCapture => Convert(await _robot.ExecuteCaptureAsync(
-                        receivedTemplate, cancellationToken)),
-                    _ => ServerActionExecutionResult.Failed(4004,
+                        receivedTemplate, cancellationToken), command, receivedTemplate),
+                    _ => ServerActionExecutionResult.Failed(PlatformErrorCodes.UnsupportedAction,
                         $"不支持 MainAction：{embeddedAction.ToActionType()}")
                 };
         }
         catch (JsonException ex)
         {
-            converted = ServerActionExecutionResult.Failed(4000, $"Action Input 格式错误：{ex.Message}");
+            converted = ServerActionExecutionResult.Failed(PlatformErrorCodes.InvalidActionInput, $"Action Input 格式错误：{ex.Message}");
         }
         catch (ArgumentException ex)
         {
-            converted = ServerActionExecutionResult.Failed(4000, ex.Message);
+            converted = ServerActionExecutionResult.Failed(PlatformErrorCodes.InvalidActionInput, ex.Message);
+        }
+        finally
+        {
+            if (progressSource is not null) progressSource.StepChanged -= OnStepChanged;
         }
 
         _states[command.ActionInstanceId] = new(converted.State, converted.PhysicalResult, converted.ResolvedSteps, converted.Error);
         return converted;
     }
 
+    private static ResolvedStep ConvertStep(OperationStep step) => new(step.Sequence, step.PhaseId,
+        step.SubAction, step.State,
+        step.Evidence is null ? null : JsonSerializer.SerializeToElement(step.Evidence, ServerActionJson.Default),
+        step.SlotId, step.CacheSlot, step.PoseRef);
+
+    private static async Task ReportProgressSafelyAsync(IServerActionExecutionContext context,
+        IReadOnlyList<ResolvedStep> steps, CancellationToken cancellationToken)
+    {
+        try { await context.ReportRunningAsync(steps, cancellationToken: cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch
+        {
+            // 状态上报失败不能改变物理设备执行结果；TCP 会话层负责断线和重连。
+        }
+    }
+
     public Task<ServerActionQueryResult> QueryAsync(string actionInstanceId, string deviceCommandId, CancellationToken cancellationToken) =>
         Task.FromResult(_states.TryGetValue(actionInstanceId, out var state)
             ? state
-            : new ServerActionQueryResult(ClientActionState.Unknown,
-                Error: new ActionError(5004, "客户端没有该动作实例的可确认记录", PhysicalResultKnown: false)));
+            : new ServerActionQueryResult(MainActionState.Hang,
+                Error: new ActionError(PlatformErrorCodes.ActionStateUnknown, "客户端没有该动作实例的可确认记录", PhysicalResultKnown: false)));
 
-    private static ServerActionExecutionResult Convert<T>(DeviceResult<T> result)
+    private static ServerActionExecutionResult Convert<T>(DeviceResult<T> result, ActionCommand command,
+        MainActionTemplate template)
     {
-        var steps = result.Steps?.Select(x => new ResolvedStep(x.Sequence, x.PhaseId, x.SubAction, x.State,
-            x.Evidence is null ? null : JsonSerializer.SerializeToElement(x.Evidence, ServerActionJson.Default),
-            x.SlotId, x.CacheSlot, x.PoseRef)).ToArray();
+        var steps = result.Steps?.Select(ConvertStep).ToArray();
         if (result.Success)
             return ServerActionExecutionResult.PhysicalDone(result.Value, steps);
 
-        var error = result.Error ?? new DeviceError(5001, "设备返回失败但没有错误信息。", PhysicalResultKnown: false);
+        var error = result.Error ?? new DeviceError(PlatformErrorCodes.InternalExecutionError, "设备返回失败但没有错误信息。", PhysicalResultKnown: false);
+        var failedStep = result.Steps?.LastOrDefault(x => x.State.Contains("FAILED", StringComparison.OrdinalIgnoreCase) ||
+            x.State is "HOLD" or "CANCEL" or "MANUAL") ?? result.Steps?.LastOrDefault();
+        var failedPhase = failedStep is null ? null : template.Phases.FirstOrDefault(x =>
+            x.PhaseId.Equals(failedStep.PhaseId, StringComparison.OrdinalIgnoreCase));
+        var onFail = failedPhase?.OnFail;
+        var choices = onFail switch
+        {
+            PhaseFailAction.RETRY_PHASE => new[] { "RETRY", "TERMINATE" },
+            PhaseFailAction.VERIFY_BEFORE_RETRY => new[] { "RETRY_AFTER_VERIFY", "TERMINATE" },
+            PhaseFailAction.SKIP => new[] { "SKIP", "TERMINATE" },
+            _ => new[] { "TERMINATE" }
+        };
+        var failureContext = new ActionFailureContext(command.ActionInstanceId,
+            template.ActionType.ToActionType(), template.TemplateId, failedStep?.PhaseId,
+            failedStep?.SubAction, onFail, choices,
+            error.PhysicalResultKnown ? MainActionState.Error : MainActionState.Hang,
+            failedStep?.State ?? "FAILED");
+        var detail = UnifiedRobotErrorModel.Create(error, failedStep?.SubAction ?? "UNKNOWN",
+            onFail?.ToString());
         return error.PhysicalResultKnown
-            ? new ServerActionExecutionResult(ClientActionState.Failed, ResolvedSteps: steps,
+            ? new ServerActionExecutionResult(MainActionState.Error, ResolvedSteps: steps,
                 Error: new ActionError(error.Code, error.Message, error.DeviceCode, true,
-                    error.Retryable, error.Category, error.RecoveryStrategy, error.HandlingAdvice))
-            : new ServerActionExecutionResult(ClientActionState.Unknown, ResolvedSteps: steps,
+                    error.Retryable, error.Category, error.RecoveryStrategy, error.HandlingAdvice,
+                    failureContext, detail))
+            : new ServerActionExecutionResult(MainActionState.Hang, ResolvedSteps: steps,
                 Error: new ActionError(error.Code, error.Message, error.DeviceCode, false,
-                    error.Retryable, error.Category, error.RecoveryStrategy, error.HandlingAdvice));
+                    error.Retryable, error.Category, error.RecoveryStrategy, error.HandlingAdvice,
+                    failureContext, detail));
     }
 
     private static T ParseRequired<T>(JsonElement input)

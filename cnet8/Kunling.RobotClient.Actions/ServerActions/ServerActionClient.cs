@@ -2,6 +2,8 @@ using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using Kunling.RobotClient.Core.Controller.Templates;
+using Kunling.RobotClient.Core.Controller.ReportStateModels;
 
 namespace Kunling.RobotClient.Actions.ServerActions;
 
@@ -25,6 +27,9 @@ public sealed class ServerActionClient : IAsyncDisposable
     private long _heartbeatSequence;
     private DateTimeOffset _lastPongAt;
     private HashSet<string> _acceptedCapabilities = new(StringComparer.OrdinalIgnoreCase);
+    private ActionCommand? _activeCommand;
+    // 单机器人客户端只保留一个未结束的 MainAction；HANG/可恢复 ERROR 时持续占有该上下文。
+    private ActionCommand? _retainedMainAction;
 
     public ServerActionClient(
         ServerActionOptions options,
@@ -173,6 +178,20 @@ public sealed class ServerActionClient : IAsyncDisposable
                         ?? throw new InvalidDataException("QUERY_ACTION为空");
                     await ReplyActionStatusAsync(stream, query, cancellationToken);
                     break;
+                case ServerMessageTypes.TerminateAction:
+                    var terminate = root.Deserialize<TerminateActionRequest>(ServerActionJson.Default)
+                        ?? throw new InvalidDataException("TERMINATE_ACTION为空");
+                    if (ValidateSession(terminate.SessionId) &&
+                        terminate.RobotId.Equals(_options.RobotId, StringComparison.OrdinalIgnoreCase) &&
+                        Volatile.Read(ref _retainedMainAction)?.ActionInstanceId.Equals(
+                            terminate.ActionInstanceId, StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        Volatile.Write(ref _retainedMainAction, null);
+                        if (_snapshotProvider is IRobotActivitySnapshotProvider activity)
+                            activity.SetCurrentAction(null);
+                        Log($"服务器结束保留动作：{terminate.ActionInstanceId}");
+                    }
+                    break;
                 default:
                     Log($"忽略未知消息类型：{messageType ?? "<null>"}");
                     break;
@@ -185,46 +204,91 @@ public sealed class ServerActionClient : IAsyncDisposable
         // 命令必须属于当前会话和当前机器人，防止串台执行。
         if (!ValidateSession(command.SessionId) || !string.Equals(command.RobotId, _options.RobotId, StringComparison.OrdinalIgnoreCase))
         {
-            await SendTerminalEventAsync(stream, command, ServerActionExecutionResult.Failed(2005, "sessionId或robotId不匹配"), sessionCancellation);
+            await SendTerminalEventAsync(stream, command, ServerActionExecutionResult.Failed(PlatformErrorCodes.SessionOrRobotMismatch, "sessionId或robotId不匹配"), sessionCancellation);
             return;
         }
 
-        if (_journal.TryGet(command.ActionInstanceId, out var historical) && historical is not null)
+        var retained = Volatile.Read(ref _retainedMainAction);
+        var isPhaseResume = retained is not null &&
+            retained.ActionInstanceId.Equals(command.ActionInstanceId, StringComparison.OrdinalIgnoreCase);
+        if (!isPhaseResume && _journal.TryGet(command.ActionInstanceId, out var historical) && historical is not null)
         {
             // actionInstanceId 是幂等键，重复命令只重放历史结果，不再次驱动设备。
             Log($"动作幂等命中：{command.ActionInstanceId}");
             await SendAsync(stream, historical with { MessageId = NewMessageId(), Sequence = NextEventSequence(), Timestamp = DateTimeOffset.UtcNow }, sessionCancellation);
             return;
         }
+        if (isPhaseResume) _journal.Remove(command.ActionInstanceId);
 
         string actionType;
         try { actionType = ReadMainActionType(command.Input); }
         catch (Exception ex) when (ex is ArgumentException or JsonException)
         {
             await SendTerminalEventAsync(stream, command,
-                ServerActionExecutionResult.Failed(4000, ex.Message), sessionCancellation);
+                ServerActionExecutionResult.Failed(PlatformErrorCodes.InvalidActionInput, ex.Message), sessionCancellation);
             return;
         }
 
         if (!_acceptedCapabilities.Contains($"{actionType}@{command.ActionVersion}") ||
             !_executor.CanExecute(actionType, command.ActionVersion, command.ExecutionMode))
         {
-            await SendTerminalEventAsync(stream, command, ServerActionExecutionResult.Failed(2005, $"客户端未认证动作 {actionType}@{command.ActionVersion}"), sessionCancellation);
+            await SendTerminalEventAsync(stream, command, ServerActionExecutionResult.Failed(PlatformErrorCodes.SessionOrRobotMismatch, $"客户端未认证动作 {actionType}@{command.ActionVersion}"), sessionCancellation);
             return;
         }
 
         if (!_inFlight.TryAdd(command.ActionInstanceId, 0)) return;
-        // 单机器人串行动作，避免底盘和机械臂收到相互冲突的命令。
-        await _actionLock.WaitAsync(sessionCancellation);
+        // HANG 主动作仍保留在客户端单例上下文中；仅相同 actionInstanceId 可以断点恢复。
+        if (retained is not null && !isPhaseResume)
+        {
+            var retainedType = ReadMainActionType(retained.Input);
+            var retainedState = await _executor.QueryAsync(retained.ActionInstanceId,
+                retained.DeviceCommandId, sessionCancellation);
+            var retainedStep = retainedState.ResolvedSteps?.LastOrDefault();
+            var busy = ServerActionExecutionResult.Busy(
+                $"机器人保留未结束动作 {retainedType}，actionInstanceId={retained.ActionInstanceId}。",
+                new ActionFailureContext(retained.ActionInstanceId, retainedType,
+                    PhaseId: retainedStep?.PhaseId, SubAction: retainedStep?.SubAction,
+                    UserChoices: ["TERMINATE_REQUEST"], MainActionState: retainedState.State,
+                    SubActionState: retainedStep?.State));
+            await SendTerminalEventAsync(stream, command, busy, sessionCancellation);
+            _inFlight.TryRemove(command.ActionInstanceId, out _);
+            return;
+        }
+        // 不把新动作静默排队：机器人被占用时立即回复 BUSY，并带回当前动作信息。
+        if (!await _actionLock.WaitAsync(0, sessionCancellation))
+        {
+            var active = Volatile.Read(ref _activeCommand);
+            var activeType = active is null ? "UNKNOWN" : ReadMainActionType(active.Input);
+            ServerActionQueryResult? activeState = null;
+            if (active is not null)
+                activeState = await _executor.QueryAsync(active.ActionInstanceId,
+                    active.DeviceCommandId, sessionCancellation);
+            var activeStep = activeState?.ResolvedSteps?.LastOrDefault();
+            var busy = ServerActionExecutionResult.Busy(
+                active is null ? "机器人正在执行其他动作。" :
+                    $"机器人正在执行 {activeType}，actionInstanceId={active.ActionInstanceId}。",
+                new ActionFailureContext(active?.ActionInstanceId ?? string.Empty, activeType,
+                    PhaseId: activeStep?.PhaseId, SubAction: activeStep?.SubAction,
+                    UserChoices: ["RETRY_LATER", "TERMINATE_REQUEST"],
+                    MainActionState: activeState?.State ?? MainActionState.Running,
+                    SubActionState: activeStep?.State ?? "RUNNING"));
+            await SendTerminalEventAsync(stream, command, busy, sessionCancellation);
+            _inFlight.TryRemove(command.ActionInstanceId, out _);
+            return;
+        }
+        ServerActionExecutionResult? completedResult = null;
         try
         {
+            Volatile.Write(ref _activeCommand, command);
             // 动作进入串行执行区后立即切换为 EXECUTING；后续每个 3 秒心跳都会携带该状态。
             if (_snapshotProvider is IRobotActivitySnapshotProvider activitySnapshot)
-                activitySnapshot.SetCurrentAction(command.ActionInstanceId);
+                activitySnapshot.SetCurrentAction(command.ActionInstanceId,
+                    isPhaseResume ? "RECOVERING" : "EXECUTING");
 
             // 标准状态顺序：ACCEPTED -> RUNNING -> 终态。
-            await SendEventAsync(stream, command, ClientActionState.Accepted, null, null, null, sessionCancellation);
-            await SendEventAsync(stream, command, ClientActionState.Running, null, null, null, sessionCancellation);
+            if (!isPhaseResume)
+                await SendEventAsync(stream, command, MainActionState.Accepted, null, null, null, sessionCancellation);
+            await SendEventAsync(stream, command, MainActionState.Running, null, null, null, sessionCancellation);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(sessionCancellation);
             timeout.CancelAfter(Math.Max(1_000, command.TimeoutMs));
             var context = new ExecutionContext(this, stream, command);
@@ -232,17 +296,33 @@ public sealed class ServerActionClient : IAsyncDisposable
             try { result = await _executor.ExecuteAsync(context, timeout.Token); }
             catch (OperationCanceledException) when (!sessionCancellation.IsCancellationRequested)
             {
-                result = ServerActionExecutionResult.Unknown(5004, "动作执行超时，物理结果待查询");
+                result = ServerActionExecutionResult.Unknown(PlatformErrorCodes.ActionStateUnknown, "动作执行超时，物理结果待查询");
             }
-            catch (Exception ex) { result = ServerActionExecutionResult.Unknown(5001, ex.Message); }
+            catch (Exception ex) { result = ServerActionExecutionResult.Unknown(PlatformErrorCodes.InternalExecutionError, ex.Message); }
+            completedResult = result;
             await SendTerminalEventAsync(stream, command, result, sessionCancellation);
         }
         finally
         {
-            // 无论成功、失败、超时还是连接取消，都恢复为空闲状态，避免状态永久停留在 EXECUTING。
-            if (_snapshotProvider is IRobotActivitySnapshotProvider activitySnapshot)
-                activitySnapshot.SetCurrentAction(null);
+            var keepForRecovery = completedResult?.State is MainActionState.Hang ||
+                                  completedResult?.State == MainActionState.Error &&
+                                  completedResult.Error?.Retryable == true;
+            if (keepForRecovery)
+            {
+                // 首次失败时缓存完整 MainAction；恢复命令只包含剩余 phases，不能覆盖完整快照。
+                if (retained is null) Volatile.Write(ref _retainedMainAction, command);
+                if (_snapshotProvider is IRobotActivitySnapshotProvider activitySnapshot)
+                    activitySnapshot.SetCurrentAction(command.ActionInstanceId,
+                        completedResult!.State.ToString().ToUpperInvariant());
+            }
+            else
+            {
+                Volatile.Write(ref _retainedMainAction, null);
+                if (_snapshotProvider is IRobotActivitySnapshotProvider activitySnapshot)
+                    activitySnapshot.SetCurrentAction(null);
+            }
 
+            Volatile.Write(ref _activeCommand, null);
             _actionLock.Release();
             _inFlight.TryRemove(command.ActionInstanceId, out _);
         }
@@ -270,9 +350,12 @@ public sealed class ServerActionClient : IAsyncDisposable
         }
 
         var queried = await _executor.QueryAsync(query.ActionInstanceId, query.DeviceCommandId, cancellationToken);
+        var report = CreateReportState(query.ActionInstanceId,
+            queried.Error?.Context?.ActionType ?? "UNKNOWN", queried.State,
+            queried.ResolvedSteps, queried.Error);
         var status = new ActionEvent("1.0", ServerMessageTypes.ActionStatus, NewMessageId(), _sessionId!, _options.RobotId,
             query.ActionInstanceId, query.DeviceCommandId, NextEventSequence(), queried.State, queried.ResolvedSteps,
-            queried.PhysicalResult, queried.Error, DateTimeOffset.UtcNow);
+            queried.PhysicalResult, queried.Error, DateTimeOffset.UtcNow, report);
         await SendAsync(stream, status, cancellationToken);
     }
 
@@ -291,7 +374,7 @@ public sealed class ServerActionClient : IAsyncDisposable
     }
 
     private async ValueTask SendRunningAsync(NetworkStream stream, ActionCommand command, IReadOnlyList<ResolvedStep>? steps, JsonElement? evidence, CancellationToken cancellationToken) =>
-        await SendEventAsync(stream, command, ClientActionState.Running, steps, evidence, null, cancellationToken);
+        await SendEventAsync(stream, command, MainActionState.Running, steps, evidence, null, cancellationToken);
 
     private async Task SendTerminalEventAsync(NetworkStream stream, ActionCommand command, ServerActionExecutionResult result, CancellationToken cancellationToken)
     {
@@ -301,13 +384,46 @@ public sealed class ServerActionClient : IAsyncDisposable
         await SendAsync(stream, actionEvent, cancellationToken);
     }
 
-    private Task SendEventAsync(NetworkStream stream, ActionCommand command, ClientActionState state,
+    private Task SendEventAsync(NetworkStream stream, ActionCommand command, MainActionState state,
         IReadOnlyList<ResolvedStep>? steps, JsonElement? physicalResult, ActionError? error, CancellationToken cancellationToken) =>
         SendAsync(stream, CreateEvent(command, state, steps, physicalResult, error), cancellationToken);
 
-    private ActionEvent CreateEvent(ActionCommand command, ClientActionState state, IReadOnlyList<ResolvedStep>? steps, JsonElement? physicalResult, ActionError? error) =>
+    private ActionEvent CreateEvent(ActionCommand command, MainActionState state, IReadOnlyList<ResolvedStep>? steps, JsonElement? physicalResult, ActionError? error) =>
         new("1.0", ServerMessageTypes.ActionEvent, NewMessageId(), _sessionId!, _options.RobotId,
-            command.ActionInstanceId, command.DeviceCommandId, NextEventSequence(), state, steps, physicalResult, error, DateTimeOffset.UtcNow);
+            command.ActionInstanceId, command.DeviceCommandId, NextEventSequence(), state, steps, physicalResult, error,
+            DateTimeOffset.UtcNow, CreateReportState(command.ActionInstanceId,
+                ReadMainActionType(command.Input), state, steps, error));
+
+    /// <summary>把分散的执行现场统一封装为服务器直接消费的状态模型。</summary>
+    private ReportRobotStateModel CreateReportState(string eventActionInstanceId, string actionType,
+        MainActionState eventState, IReadOnlyList<ResolvedStep>? steps, ActionError? error)
+    {
+        var failure = error?.Context;
+        var latestStep = steps?.LastOrDefault();
+        var actionInstanceId = string.IsNullOrWhiteSpace(failure?.ActionInstanceId)
+            ? eventActionInstanceId : failure.ActionInstanceId;
+        var mainState = failure?.MainActionState ??
+                        (eventState == MainActionState.Busy ? MainActionState.Running : eventState);
+        var subActionName = failure?.SubAction ?? latestStep?.SubAction;
+        var subAction = string.IsNullOrWhiteSpace(subActionName) ? null : new ReportSubActionStateModel(
+            subActionName,
+            failure?.SubActionState ?? latestStep?.State ?? "RUNNING",
+            failure?.PhaseId ?? latestStep?.PhaseId,
+            failure?.OnFail?.ToString(),
+            error is null ? null : error.DeviceCode ?? error.Code.ToString(),
+            error?.Message,
+            error?.Detail);
+        var robotState = mainState switch
+        {
+            MainActionState.Accepted or MainActionState.Running => "EXECUTING",
+            MainActionState.Hang => "HANG",
+            MainActionState.Error => "ERROR",
+            _ => "IDLE"
+        };
+        return new ReportRobotStateModel(_options.RobotId, robotState, actionInstanceId,
+            new ReportMainActionStateModel(failure?.ActionType ?? actionType, mainState),
+            subAction, DateTimeOffset.UtcNow);
+    }
 
     private async Task SendAsync(NetworkStream stream, object message, CancellationToken cancellationToken)
     {
