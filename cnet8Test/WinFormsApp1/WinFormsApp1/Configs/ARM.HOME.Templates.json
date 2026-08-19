@@ -1,0 +1,56 @@
+{
+  "actionTemplates": [
+    {
+      "actionType": "ARM.HOME",
+      "phases": [
+        {
+          "phaseId": "chassisInterlock",
+          "subAction": "CHASSIS_VERIFY_STOPPED",
+          "enabled": true,
+          "params": {
+            "maxRetries": 0
+          },
+          "gate": true,
+          "onFail": "ABORT"
+        },
+        {
+          "phaseId": "home",
+          "subAction": "MOVE_TO_POSE",
+          "enabled": true,
+          "params": {
+            "poseRole": "HOME",
+            "positionToleranceMm": 2,
+            "angleToleranceDeg": 1,
+            "settleMs": 200,
+            "timeoutMs": 10000,
+            "pollMs": 50,
+            "frame": "BASE",
+            "speedProfile": "NORMAL",
+            "collisionProfile": "SAFE",
+            "maxRetries": 1,
+            "pose": {
+              "x": 0,
+              "y": 0,
+              "z": 500,
+              "rx": 180,
+              "ry": 0,
+              "rz": 0
+            }
+          },
+          "gate": false,
+          "onFail": "VERIFY_BEFORE_RETRY"
+        },
+        {
+          "phaseId": "verifyHome",
+          "subAction": "ARM_VERIFY_HOME",
+          "enabled": true,
+          "params": {
+            "maxRetries": 0
+          },
+          "gate": true,
+          "onFail": "ABORT"
+        }
+      ]
+    }
+  ]
+}

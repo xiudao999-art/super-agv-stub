@@ -1,0 +1,9 @@
+{
+  "actionTemplates": [{
+    "actionType": "VISION.CAPTURE",
+    "phases": [
+      { "phaseId": "capture", "subAction": "VISION_CAPTURE", "enabled": true, "params": { "recipe": "DEFAULT_CAPTURE", "cameraId": "CAM01", "exposureMs": 12, "gain": 1.2, "timeoutMs": 5000, "outputFormat": "png", "simulatedPass": true, "maxRetries": 1 }, "gate": true, "onFail": "RETRY_PHASE" }
+    ]
+  }]
+}
+

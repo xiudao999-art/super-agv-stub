@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Kunling.RobotClient.Core</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <Folder Include="Controller\Templates\ArmPickActionTemplates\" />
+    <Folder Include="Controller\Templates\ArmPickBatchActionTemplates\" />
+    <Folder Include="Controller\Templates\ArmPlaceBatchActionTemplates\" />
+    <Folder Include="Controller\Templates\ArmPlaceActionTemplates\" />
+    <Folder Include="Controller\Templates\VisionCaptureActionTemplates\" />
+  </ItemGroup>
+</Project>

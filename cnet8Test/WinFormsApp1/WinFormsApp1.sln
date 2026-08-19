@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.37531.7
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinFormsApp1", "WinFormsApp1\WinFormsApp1.csproj", "{1E57E652-6769-49E7-84B2-5395CEB6E0FD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kunling.RobotClient.Core", "..\..\cnet8\src\Kunling.RobotClient.Core\Kunling.RobotClient.Core.csproj", "{492FD2DE-6D60-A544-96DF-C7884E407B30}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1E57E652-6769-49E7-84B2-5395CEB6E0FD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1E57E652-6769-49E7-84B2-5395CEB6E0FD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1E57E652-6769-49E7-84B2-5395CEB6E0FD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1E57E652-6769-49E7-84B2-5395CEB6E0FD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{492FD2DE-6D60-A544-96DF-C7884E407B30}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{492FD2DE-6D60-A544-96DF-C7884E407B30}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{492FD2DE-6D60-A544-96DF-C7884E407B30}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{492FD2DE-6D60-A544-96DF-C7884E407B30}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {0CF3C789-6E5A-468A-A378-5623C3C56225}
+	EndGlobalSection
+EndGlobal

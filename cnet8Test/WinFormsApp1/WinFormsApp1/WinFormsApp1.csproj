@@ -1,0 +1,24 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\cnet8\Kunling.RobotClient.Actions\Kunling.RobotClient.Actions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Configs\MOVE.Templates.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Configs\ARM.PICK.Templates.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Configs\ARM.PLACE.Templates.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Configs\ARM.HOME.Templates.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Configs\VISION.CAPTURE.Templates.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Configs\ActionConfiguration.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

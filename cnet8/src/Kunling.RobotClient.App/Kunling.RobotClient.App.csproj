@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Kunling.RobotClient.App</RootNamespace>
+    <AssemblyName>KunlingRobotClient</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 当前加载内存虚拟设备，不连接真实厂商 SDK。 -->
+    <ProjectReference Include="..\..\Kunling.RobotClient.Actions\Kunling.RobotClient.Actions.csproj" />
+    <!-- Program直接使用RobotConfig；必须直接引用Core，避免VS设计时编译选中传递依赖中的旧元数据。 -->
+    <ProjectReference Include="..\Kunling.RobotClient.Core\Kunling.RobotClient.Core.csproj" />
+    <ProjectReference Include="..\Kunling.RobotClient.Devices\Kunling.RobotClient.Devices.csproj" />
+    <!-- Program直接持有两个厂家客户端实例；显式引用可避免VS设计时编译只加载到旧的传递依赖元数据。 -->
+    <ProjectReference Include="..\..\Kunling.RobotClient.Devices.HikvisionMobileRobot\Kunling.RobotClient.Devices.HikvisionMobileRobot.csproj" />
+    <ProjectReference Include="..\..\Kunling.RobotClient.Devices.HuayanRobot\Kunling.RobotClient.Devices.HuayanRobot.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 动作模板属于机器人客户端运行资源，始终复制到输出目录的 Configs 子目录。 -->
+    <None Update="Configs\*.Templates.json"
+          CopyToOutputDirectory="PreserveNewest"
+          TargetPath="Configs\%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

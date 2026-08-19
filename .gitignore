@@ -1,0 +1,12 @@
+# ===== 用户指定排除 =====
+cnet8.1/
+java/
+cnet8.zip
+cnet8Test.zip
+
+# ===== .NET 编译产物（避免把 bin/obj 推上仓库）=====
+**/bin/
+**/obj/
+**/.vs/
+*.user
+*.suo

@@ -1,0 +1,70 @@
+{
+  "stationProfiles": [
+    {
+      "station": "PICK_01",
+      "common": {
+        "frame": "BASE",
+        "positionToleranceMm": 2,
+        "angleToleranceDeg": 1,
+        "settleMs": 200,
+        "timeoutMs": 10000,
+        "pollMs": 50
+      },
+      "phases": {
+        "safe": {
+          "speedProfile": "FAST",
+          "collisionProfile": "SAFE",
+          "pose": { "x": 300, "y": 0, "z": 450, "rx": 180, "ry": 0, "rz": 0 }
+        },
+        "approach": {
+          "speedProfile": "NORMAL",
+          "collisionProfile": "NORMAL",
+          "pose": { "x": 400, "y": 100, "z": 250, "rx": 180, "ry": 0, "rz": 0 }
+        },
+        "toPick": {
+          "speedProfile": "SLOW",
+          "collisionProfile": "SENSITIVE",
+          "pose": { "x": 400, "y": 100, "z": 150, "rx": 180, "ry": 0, "rz": 0 }
+        },
+        "retreat": {
+          "speedProfile": "NORMAL",
+          "collisionProfile": "NORMAL",
+          "pose": { "x": 400, "y": 100, "z": 350, "rx": 180, "ry": 0, "rz": 0 }
+        }
+      }
+    },
+    { "station": "PLACE_01", "common": { "frame": "BASE" }, "phases": {} },
+    { "station": "GLOBAL", "common": { "frame": "BASE" }, "phases": {} },
+    { "station": "CAMERA_01", "common": {}, "phases": {} }
+  ],
+  "graspProfiles": [
+    {
+      "name": "DEFAULT_PICK",
+      "params": { "holdMs": 150 },
+      "phases": {
+        "preOpen": { "preOpenWidthMm": 95.0, "targetWidthMm": 95.0 },
+        "close": { "gripWidthMm": 85.5, "targetWidthMm": 85.5, "gripForceLevel": "MID", "gripForce": 35.0 },
+        "verifyLoad": { "holdCheck": "PRESENCE_SENSOR", "expectedDetected": true }
+      }
+    },
+    {
+      "name": "DEFAULT_PLACE",
+      "params": { "holdMs": 180 },
+      "phases": {
+        "release": { "releaseWidthMm": 100.0, "targetWidthMm": 100.0 },
+        "verifyEmpty": { "holdCheck": "PRESENCE_SENSOR", "expectedDetected": false }
+      }
+    }
+  ],
+  "actionPolicies": [
+    { "name": "SAFE_DEFAULT", "params": { "maxRetries": 1, "retryDelayMs": 500, "onExhaust": "HOLD" } }
+  ],
+  "recipes": [
+    { "name": "MATERIAL", "params": { "cameraId": "CAM01", "timeoutMs": 5000 } },
+    { "name": "MATERIAL_BEFORE", "params": { "cameraId": "CAM01", "timeoutMs": 5000 } },
+    { "name": "PLACEMENT", "params": { "cameraId": "CAM01", "timeoutMs": 5000 } },
+    { "name": "PLACEMENT_BEFORE", "params": { "cameraId": "CAM01", "timeoutMs": 5000 } },
+    { "name": "PLACEMENT_AFTER", "params": { "cameraId": "CAM01", "timeoutMs": 5000 } },
+    { "name": "DEFAULT_CAPTURE", "params": { "cameraId": "CAM01", "outputFormat": "png" } }
+  ]
+}

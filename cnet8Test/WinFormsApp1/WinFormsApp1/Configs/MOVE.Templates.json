@@ -1,0 +1,24 @@
+{
+  "positions": [
+    { "pointName": "P01", "pose": { "x": 12480, "y": 8220, "yaw": 90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P02", "pose": { "x": 2185, "y": 3742, "yaw": 0, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P03", "pose": { "x": 4360, "y": 1915, "yaw": 180, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P04", "pose": { "x": 6875, "y": 2540, "yaw": 90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P05", "pose": { "x": 9350, "y": 4680, "yaw": -90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.25 },
+    { "pointName": "P06", "pose": { "x": 1580, "y": 6925, "yaw": 0, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P07", "pose": { "x": 3295, "y": 8470, "yaw": 90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P08", "pose": { "x": 5720, "y": 7355, "yaw": 180, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P09", "pose": { "x": 8145, "y": 9130, "yaw": -90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.25 },
+    { "pointName": "P10", "pose": { "x": 10670, "y": 6485, "yaw": 0, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P11", "pose": { "x": 1735, "y": 10860, "yaw": 90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P12", "pose": { "x": 3980, "y": 11975, "yaw": 180, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P13", "pose": { "x": 6255, "y": 10420, "yaw": -90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.25 },
+    { "pointName": "P14", "pose": { "x": 8620, "y": 12735, "yaw": 0, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P15", "pose": { "x": 11145, "y": 11380, "yaw": 90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P16", "pose": { "x": 2460, "y": 14525, "yaw": 180, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P17", "pose": { "x": 4875, "y": 15840, "yaw": -90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.25 },
+    { "pointName": "P18", "pose": { "x": 7310, "y": 14195, "yaw": 0, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P19", "pose": { "x": 9745, "y": 16610, "yaw": 90, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.5 },
+    { "pointName": "P20", "pose": { "x": 12180, "y": 14965, "yaw": 180, "map": "LAB" }, "arrival": { "positionToleranceMm": 5, "angleToleranceDeg": 5, "timeoutMs": 30000 }, "speed": 0.25 }
+  ]
+}

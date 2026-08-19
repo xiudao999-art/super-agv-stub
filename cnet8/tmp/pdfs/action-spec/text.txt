@@ -1,0 +1,337 @@
+
+===== PAGE 1 =====
+ACTION CONFIGURATION DESIGN · 动作配置设计规范
+坤灵复合机器⼈调度系统
+A c t i o n 配 置 设 计 规 范
+⽂档版本 V1.0
+编写时间 2026.8.13
+适⽤对象 调度系统研发 / 交付实施 / 上游对接⽅
+⽂档状态 正式发布
+坤灵智⾏科技 · KUNLING ZHIXING TECHNOLOGY
+===== PAGE 2 =====
+⽬录
+坤灵复合机器⼈调度系统 Action 配置设计规范（V1.0）
+1. 设计⽬标与原则
+2. 分层模型（L0–L3）
+3. 主动作清单（L2，对上游暴露）
+4. ⼦动作清单（L1，仅内部编排）
+5. 主-⼦动作关系：动作模板（actionTemplate）
+5.1 phase 结构
+5.2 ARM.PICK 标准模板（⼦动作如何融合进主动作）
+5.3 ARM.PLACE 标准模板
+5.4 复合主动作 ARM.PICK_BATCH / PLACE_BATCH
+6. 配置对象总览与优先级
+7. 参数枚举与取值汇总
+7.1 ⽬标引⽤（target）
+7.2 位姿引⽤（poseSet / poseSequence）
+7.3 夹取配⽅（graspProfile）
+7.4 到位与运动
+7.5 复合动作
+7.6 前置条件（preconditions）
+7.7 超时与重试（actionPolicy）
+8. 失败处置与断点续跑
+9. 完整配置样例
+9.1 动作模板（ARM.PICK，天津 SBS 板）
+9.2 站点档案（天津窗⼝/槽位/互锁）
+9.3 夹取配⽅（SBS 板，12 种耗材复⽤⼀套）
+9.4 动作策略
+9.5 上游/订单⾥的⼀次取料调⽤（只引⽤配置）
+10. 三项⽬配置差异对照（接⼝与动作代码零改动）
+11. 本期范围说明
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 2
+===== PAGE 3 =====
+坤灵复合机器⼈调度系统 Action 配置设计规范（V1.0）
+⾯向对象：调度系统研发、交付实施、上游对接⽅ 配套⽂档：《坤灵复合机器⼈调度系统 信息化系统对接规范》（对上游接
+⼝） 本⽂档定位：定义调度系统”动作（Action）“的分层模型、主动作与⼦动作的编排关系、以及项⽬落地时的配置⽅法。
+上游只调⽤主动作，⼦动作与参数由调度按配置编排，项⽬差异只改配置、不改接⼝与动作代码。
+1. 设计⽬标与原则
+1. 分层解耦：上游看到的是稳定的”业务级主动作”；夹⽖开合、视觉复核、位姿移动等”设备级⼦动作”完全内聚在调度侧，
+不外泄。
+2. 编排即配置：⼀个主动作 = ⼀段有序的⼦动作（phase）序列。序列、开关、参数全部来⾃配置（动作模板 + 站点档案 +
+夹取配⽅ + 动作策略），不写死在代码⾥。
+3. 零代码适配：新项⽬/新⼯位只增改配置对象；接⼝签名、动作封装代码保持不变。
+4. 可追溯、可续跑：主动作执⾏时把展开后的每个⼦动作（phase）结果回填 ，⽀持精确定位失败点与断点
+resolvedSteps
+续跑。
+5. 安全优先：取放类动作强制”复核后重试（VERIFY_BEFORE_RETRY）“，前置条件（互锁）不满⾜不启动。
+2. 分层模型（L0–L3）
+层 名称 说明 是否对上游暴露
+L0 设备指令 控制器/底盘/相机的原始指令、recipe 内的关节轨迹 否
+L1 ⼦动作 Sub-Action 单⼀设备语义的最⼩可编排单元（移位姿、夹⽖开合、视觉复核…） 否（仅内部编排）
+L2 主动作 Main-Action 由⼦动作有序编排成的业务级原⼦动作（取料、放料、复合取放、移动…） 是（上游可调）
+L3 订单 / 模板 由多个主动作组成的完整业务流程 是（对应对接规范 2.1）
+关系⼀句话：订单(L3) 调⽤ 主动作(L2)，主动作按模板展开为 ⼦动作(L1) 序列，⼦动作下发 设备指令(L0)。
+图 1 · 动作分层与调⽤关系（订单 → 主动作 → ⼦动作 → 设备）
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 3
+===== PAGE 4 =====
+动作分层与调⽤关系
+主动作永不裸调设备：它只按模板把⼦动作串成 phase 序列；真实坐标/轨迹在 L0 recipe。复合动作（PICK_BATCH
+/ PLACE_BATCH）在⼀次靠位内循环调⽤单次取/放⼦序列。
+3. 主动作清单（L2，对上游暴露）
+actionType 含义 主要引⽤配置
+MOVE 底盘移动到站点/窗⼝对接点 站点档案 · port
+ARM.PICK 单次取料（1 载具） graspProfile + poseSet + arrival/motion
+ARM.PLACE 单次放料（1 载具） graspProfile + poseSet + arrival/motion
+ARM.PICK_BATCH 复合取料（⼀次靠位连续取 N 个） 上加 orderPolicy + cacheAssign
+ARM.PLACE_BATCH 复合放料（连续放 N 个） 同上
+ARM.HOME 协作臂归零 poseSet(HOME)
+VISION.CAPTURE 现场拍照（对应对接规范 2.10） 相机档案
+主动作是上游/订单模板⾥能引⽤的全部动作。除此之外的⼀切（夹⽖、视觉复核、位姿移动、到位判定）都是⼦动
+作，不能被上游直接调⽤。
+4. ⼦动作清单（L1，仅内部编排）
+subAction 类别 含义
+MOVE_TO_POSE 运动 移到某 poseRole （SAFE/APPROACH/PICK/PLACE/RETREAT/…），内含到位判定
+GRIP.OPEN 夹⽖ 张开到⽬标开⼝（取料前预开⼝ / 放料后释放）
+GRIP.CLOSE 夹⽖ 合到⽬标夹持宽度与夹持⼒
+GRIP.VERIFY_LOAD 夹⽖ 校验夹持状态（抓到 / 空⽖），⼒或传感反馈
+VISION.VERIFY_MATERIAL 视觉 取料前：确认⽬标位有正确物料并识别
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 4
+===== PAGE 5 =====
+subAction 类别 含义
+VISION.VERIFY_PLACEMENT 视觉 放料前后：确认⽬标位可放 / 已放到位
+RFID 相关⼦动作（ ）本期不纳⼊动作编排。库位占⽤/托盘 RFID 由智能料架
+RFID.READ / WAIT_STABLE / BIND_SLOT
+固定式读写器与⻋载读写器在后台⾃动维护（⻅对接规范 2.7/2.8），不作为可编排⼦动作暴露。预留扩展位，后续如
+需”取放即绑定 RFID”再引⼊。
+5. 主-⼦动作关系：动作模板（actionTemplate）
+主动作的⾏为由⼀个动作模板定义。模板 = 有序的 数组；每个 phase 绑定⼀个⼦动作，并携带参数、成功判定、失
+phases
+败处置。
+5.1 phase 结构
+字段 类型 说明
+phaseId string 阶段标识（模板内唯⼀）
+subAction enum 第 4 节⼦动作之⼀
+enabled boolean 是否启⽤（⼯位级可覆写，⽤于开关视觉复核等）
+params object 该⼦动作参数；未显式给出的从档案/配⽅继承
+gate boolean 是否为”闸⻔阶段”：失败则中⽌主动作（如夹持校验、视觉复核）
+onFail enum 失败处置： ABORT / RETRY_PHASE / VERIFY_BEFORE_RETRY / SKIP
+5.2 标准模板（⼦动作如何融合进主动作）
+ARM.PICK
+图 2 · 取料主动作内部⼦动作编排（菱形为 gate 闸⻔阶段，失败即中⽌）
+ARM.PICK
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 5
+===== PAGE 6 =====
+ARM.PICK 内部编排
+序 phaseId subAction 关键参数来源 gate onFail
+1 safe MOVE_TO_POSE poseSet.SAFE 否 RETRY_PHASE
+2 approach MOVE_TO_POSE poseSet.APPROACH 否 RETRY_PHASE
+3 verifyMat VISION.VERIFY_MATERIAL 相机档案 + 物料期望 是 ABORT
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 6
+===== PAGE 7 =====
+序 phaseId subAction 关键参数来源 gate onFail
+4 preOpen GRIP.OPEN graspProfile.preOpenWidthMm 否 RETRY_PHASE
+5 toPick MOVE_TO_POSE poseSet.PICK + arrival 否 VERIFY_BEFORE_RETRY
+6 close GRIP.CLOSE graspProfile.gripWidthMm/gripForceLevel 否 RETRY_PHASE
+7 verifyLoad GRIP.VERIFY_LOAD graspProfile.holdCheck 是 VERIFY_BEFORE_RETRY
+8 retreat MOVE_TO_POSE poseSet.RETREAT 否 RETRY_PHASE
+说明：GRIP.OPEN/CLOSE/VERIFY_LOAD 与 VISION.VERIFY_MATERIAL 都是以 phase 形式嵌进 。是
+ARM.PICK
+否做视觉复核＝把 打开/关闭；夹持校验失败＝ 触发 （先复
+verifyMat.enabled verifyLoad VERIFY_BEFORE_RETRY
+核物料是否已在⽖中，再决定重试或转⼈⼯），杜绝盲重试导致的双抓/撞板。
+5.3 标准模板
+ARM.PLACE
+图 3 · 放料主动作内部⼦动作编排（放置复核失败⾃动拍照取证）
+ARM.PLACE
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 7
+===== PAGE 8 =====
+ARM.PLACE 内部编排
+序 phaseId subAction 关键参数来源 gate onFail
+1 safe MOVE_TO_POSE poseSet.SAFE 否 RETRY_PHASE
+2 approach MOVE_TO_POSE poseSet.APPROACH 否 RETRY_PHASE
+3 verifyDst VISION.VERIFY_PLACEMENT ⽬标位可放校验 是 ABORT
+4 toPlace MOVE_TO_POSE poseSet.PLACE + arrival + 否 VERIFY_BEFORE_RETRY
+pressDownMm
+5 release GRIP.OPEN graspProfile.releaseWidthMm 否 RETRY_PHASE
+6 verifyEmpty GRIP.VERIFY_LOAD holdCheck（期望空⽖） 是 VERIFY_BEFORE_RETRY
+7 verifyPlaced VISION.VERIFY_PLACEMENT 放置到位复核（放料异常⾃动拍照取证） 是 ABORT
+8 retreat MOVE_TO_POSE poseSet.RETREAT 否 RETRY_PHASE
+放料异常（verifyPlaced 失败）触发对接规范中的”放料异常⾃动拍照 + 回调上游”。
+5.4 复合主动作
+ARM.PICK_BATCH / PLACE_BATCH
+图 4 · 复合动作循环编排（⼀次靠位、连续取 N 个）（失败仅回退当前 slot，靠 续跑）
+ARM.PICK_BATCH resolvedSteps
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 8
+===== PAGE 9 =====
+ARM.PICK_BATCH 循环编排
+复合动作 = 在⼀次靠位内，把 5.2/5.3 的单次取/放模板作为”⼦序列”按 slot 顺序重复 N 次，中间不重复 safe/approach
+的靠位。展开顺序由 决定，缓存位由 分配。
+orderPolicy cacheAssign
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 9
+===== PAGE 10 =====
+PICK_BATCH:
+approach(⼀次)
+for slot in 排序(slots, orderPolicy): # RANK_ASC / ROW_BACK_FIRST / ...
+[verifyMat → preOpen → toPick → close → verifyLoad → ⼊ cacheSlot]
+retreat(⼀次)
+6. 配置对象总览与优先级
+调度系统的动作⾏为由 5 类配置对象组合决定：
+配置对象 定义什么 粒度
+actionTemplate 动作模 主动作的 phase 序列、各 phase 开关与默认 onFail 按主动作类型（可派⽣站点专
+板 ⽤版）
+StationProfile 站点档 station / port / slot、poseSet、preconditions（互锁）、slotSelectPolicy、 站点·窗⼝·槽位
+案 rank/row/depth
+graspProfile 夹取配⽅ tool / graspMode / 夹持宽度⼒ / pickHeightMode / holdCheck 等载具相 按载具类型
+关参数
+actionPolicy 动作策略 timeoutMs / retryPolicy / 默认 speedProfile 等按节拍调优项 按主动作或订单
+recipe 控制器配⽅ 真实关节轨迹、arrival 阈值、速度曲线 控制器内，poseRef 引⽤
+参 数 解 析 优 先 级 （ ⾼ → 低 覆 盖 ）： 订 单 ⼊ 参 覆 写 > 站 点 档 案 ( ⼯ 位 专 ⽤ override) > 绑 定 的
+actionTemplate/graspProfile/actionPolicy 默认值 > recipe 内建 。
+7. 参数枚举与取值汇总
+7.1 ⽬标引⽤（target）
+参数 类型 可选值 样例
+stationId string 全局唯⼀ TJ_STORE
+portId string station 内唯⼀ WINDOW_1
+slotId / slotIds string / string[] port 内唯⼀ INNER_1
+selectMode enum EXPLICIT · SLOT_BY_POLICY · PORT_BY_POLICY SLOT_BY_POLICY
+count integer ≥1（策略选位时） 6
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 10
+===== PAGE 11 =====
+7.2 位姿引⽤（poseSet / poseSequence）
+参数 类型 可选值
+poseRole enum SAFE · APPROACH · PICK · PLACE · RETREAT · PERCH · VISION · HANDOVER · HOME
+poseSource enum RECIPE · VISION_CORRECTED · OFFSET · DYNAMIC
+frame enum BASE · STATION · MARKER · TOOL
+poseRef string 指向控制器 recipe 条⽬，⾮坐标
+7.3 夹取配⽅（graspProfile）
+参数 类型 可选值 / 样例
+tool enum PLATE_GRIPPER · RACK_GRIPPER · TRAY_FORK ·
+SAMPLE_DISK_GRIPPER
+graspMode enum OUTER_CLAMP · INNER_EXPAND · VACUUM_SUCK ·
+FORK_LIFT
+gripWidthMm / preOpenWidthMm / number(mm) 85.5 / 95 / 100
+releaseWidthMm
+gripForceLevel enum LOW · MID · HIGH
+pickHeightMode / placeHeightMode enum FIXED · RANGE_SCAN · VISION_Z · PROBE
+liftHeightMm / pressDownMm number(mm) 20 / 2
+holdCheck / placeCheck enum NONE · FORCE · PRESENCE_SENSOR · VISION
+7.4 到位与运动
+参数 类型 可选值 / 样例
+toleranceMm number(mm) 0.5 / 1.0 / 2.0
+arrivalCheck enum POSITION · FORCE · PRESENCE · VISION · COMBO
+settleMs integer(ms) 200
+speedProfile enum SLOW · NORMAL · FAST · CLEAN_SLOW
+collisionProfile enum STRICT · NORMAL · RELAXED
+7.5 复合动作
+参数 类型 可选值
+orderPolicy enum RANK_ASC · RANK_DESC · ROW_FRONT_FIRST · ROW_BACK_FIRST · NEAREST · EXPLICIT
+cacheAssign enum SEQUENTIAL · EXPLICIT_MAP · AUTO
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 11
+===== PAGE 12 =====
+参数 类型 可选值
+slot 属性 — pickRank · placeRank (int) · row (FRONT/BACK) · depth (int)
+7.6 前置条件（preconditions）
+station.ready · permit.granted · door.open · finePositioned · gripper.empty · gripper.holding ·
+cache.available · arm.homed
+7.7 超时与重试（actionPolicy）
+参数 类型 可选值 / 样例
+timeoutMs integer(ms) 15000 (取放) / 60000 (靠位)
+retryPolicy.mode enum NO_RETRY · IMMEDIATE · VERIFY_BEFORE_RETRY
+retryPolicy.maxRetries integer 0–3
+retryPolicy.backoffMs integer(ms) 1000
+retryPolicy.onExhaust enum HOLD · CANCEL · MANUAL
+硬约束： 的 只允许 ； 类可⽤
+ARM.PICK / ARM.PLACE / *_BATCH retryPolicy.mode VERIFY_BEFORE_RETRY MOVE
+。
+IMMEDIATE
+8. 失败处置与断点续跑
+1. phase 级处置：每个 phase 的 决定失败动作； 的 phase 失败必然中⽌主动作并上报。
+onFail gate=true
+2. 动作级重试：取放动作重试前必须先执⾏复核（VISION.VERIFY_* / GRIP.VERIFY_LOAD），确认物料真实位置后再决定
+重试或转⼈⼯。
+3. 回填 resolvedSteps：主动作执⾏时把每个展开⼦动作的结果写⼊ ，复合动作精确到每个 slot：
+resolvedSteps
+"resolvedSteps": [
+{ "seq": 1, "slotId": "INNER_1", "cacheSlot": "CACHE_1", "phase": "verifyLoad", "poseRef": "PP_INNER_
+1.PICK@3", "state": "DONE" },
+{ "seq": 2, "slotId": "INNER_2", "cacheSlot": "CACHE_2", "phase": "toPick", "poseRef": "PP_INNER_
+2.PICK@3", "state": "RUNNING" }
+]
+4. 续跑：失败恢复后按 从未完成的 seq/phase 继续，不整批重来。
+resolvedSteps
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 12
+===== PAGE 13 =====
+9. 完整配置样例
+9.1 动作模板（ARM.PICK，天津 SBS 板）
+{
+"actionType": "ARM.PICK",
+"templateId": "PICK_SBS_TJ",
+"phases": [
+{ "phaseId": "safe", "subAction": "MOVE_TO_POSE", "params": { "poseRole": "SAFE" } },
+{ "phaseId": "approach", "subAction": "MOVE_TO_POSE", "params": { "poseRole": "APPROACH" } },
+{ "phaseId": "verifyMat", "subAction": "VISION.VERIFY_MATERIAL", "enabled": true, "gate": true, "on
+Fail": "ABORT" },
+{ "phaseId": "preOpen", "subAction": "GRIP.OPEN", "params": { "widthMm": 95 } },
+{ "phaseId": "toPick", "subAction": "MOVE_TO_POSE", "params": { "poseRole": "PICK" },
+"onFail": "VERIFY_BEFORE_RETRY" },
+{ "phaseId": "close", "subAction": "GRIP.CLOSE", "params": { "widthMm": 85.5, "gripForceLeve
+l": "MID" } },
+{ "phaseId": "verifyLoad", "subAction": "GRIP.VERIFY_LOAD", "gate": true, "onFail": "VERIFY_BEFORE_R
+ETRY" },
+{ "phaseId": "retreat", "subAction": "MOVE_TO_POSE", "params": { "poseRole": "RETREAT" } }
+]
+}
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 13
+===== PAGE 14 =====
+9.2 站点档案（天津窗⼝/槽位/互锁）
+{
+"stationId": "TJ_STORE", "stationType": "SMART_STORAGE", "adapter": "customer-upper-http",
+"ports": [{
+"portId": "WINDOW_1",
+"poseSet": {
+"SAFE":{"poseSource":"RECIPE","poseRef":"TJ_W1.SAFE"},
+"APPROACH":{"poseSource":"RECIPE","poseRef":"TJ_W1.APPROACH"},
+"PICK":{"poseSource":"VISION_CORRECTED","poseRef":"PP_INNER_1.PICK@3"},
+"RETREAT":{"poseSource":"RECIPE","poseRef":"TJ_W1.RETREAT"}
+},
+"preconditions": ["station.ready","finePositioned","gripper.empty","permit.granted"],
+"slotSelectPolicy": "DEVICE_INNER_FIRST",
+"slots": [
+{"slotId":"INNER_1","pickRank":1,"placeRank":1,"row":"BACK","depth":2,"recipe":"PP_INNER_1@3"},
+{"slotId":"OUTER_1","pickRank":3,"placeRank":3,"row":"FRONT","depth":1,"recipe":"PP_OUTER_1@3"}
+]
+}]
+}
+9.3 夹取配⽅（SBS 板，12 种耗材复⽤⼀套）
+{
+"graspProfileId": "SBS_PLATE",
+"tool": "PLATE_GRIPPER", "graspMode": "OUTER_CLAMP",
+"gripWidthMm": 85.5, "preOpenWidthMm": 95, "releaseWidthMm": 100, "gripForceLevel": "MID",
+"pickHeightMode": "RANGE_SCAN", "heightScan": { "minMm": 50, "maxMm": 160 },
+"liftHeightMm": 20, "holdCheck": "PRESENCE_SENSOR",
+"placeHeightMode": "FIXED", "pressDownMm": 2, "placeCheck": "VISION"
+}
+9.4 动作策略
+{
+"policyId": "PICK_PLACE_DEFAULT",
+"timeoutMs": 15000,
+"retryPolicy": { "mode": "VERIFY_BEFORE_RETRY", "maxRetries": 2, "backoffMs": 1000, "onExhaust": "HOL
+D" },
+"motion": { "speedProfile": "CLEAN_SLOW", "collisionProfile": "STRICT" }
+}
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 14
+===== PAGE 15 =====
+9.5 上游/订单⾥的⼀次取料调⽤（只引⽤配置）
+{
+"type": "ACT", "actionType": "ARM.PICK",
+"target": { "stationId": "TJ_STORE", "portId": "WINDOW_1", "slotId": "INNER_1" },
+"graspProfileId": "SBS_PLATE",
+"cacheSlot": "CACHE_3"
+}
+模板、位姿、配⽅、策略均由绑定关系解析，上游⽆需感知⼦动作与坐标。
+10. 三项⽬配置差异对照（接⼝与动作代码零改动）
+维度 天津 合全 百奥赛图 POC
+主动作 PICK/PLACE + PICK_BATCH(6) 多为单 PICK/PLACE 单 PICK/PLACE
+窗⼝/槽位 多窗⼝、内/外位置 料架库位（RFID 占⽤账） 单/双⼯位
+夹取配⽅ SBS_PLATE（RANGE_SCAN 50–160） TUBE_RACK / FULL_TRAY HPLC_DISK（VISION_Z）
+视觉复核 verifyMat/verifyPlaced 开 按⼯位开关 关键⼯位开
+顺序策略 RANK_ASC / ROW_BACK_FIRST 库位 rank count≤2
+差异落点 站点档案 + 配⽅ + 模板开关 同左 同左
+11. 本期范围说明
+纳⼊： 及其⼦动
+MOVE / ARM.PICK / ARM.PLACE / ARM.PICK_BATCH / ARM.PLACE_BATCH / ARM.HOME / VISION.CAPTURE
+作编排、上述 5 类配置对象。
+暂不纳⼊：RFID 相关⼦动作编排（ ）——库位/托盘 RFID 由固定式与⻋载读写
+RFID.READ / WAIT_STABLE / BIND_SLOT
+器后台⾃动维护，仅经查询接⼝对外，预留后续扩展。
+坤灵复合机器⼈调度系统 · 信息化系统对接规范 15

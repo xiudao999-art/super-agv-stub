@@ -1,0 +1,182 @@
+{
+  "actionTemplates": [
+    {
+      "actionType": "ARM.PLACE",
+      "phases": [
+        {
+          "phaseId": "safe",
+          "subAction": "MOVE_TO_POSE",
+          "enabled": true,
+          "params": {
+            "poseRole": "SAFE",
+            "positionToleranceMm": 2,
+            "angleToleranceDeg": 1,
+            "settleMs": 200,
+            "timeoutMs": 10000,
+            "pollMs": 50,
+            "frame": "BASE",
+            "speedProfile": "FAST",
+            "collisionProfile": "SAFE",
+            "maxRetries": 1,
+            "pose": {
+              "x": 300,
+              "y": 0,
+              "z": 450,
+              "rx": 180,
+              "ry": 0,
+              "rz": 0
+            }
+          },
+          "gate": false,
+          "onFail": "RETRY_PHASE"
+        },
+        {
+          "phaseId": "approach",
+          "subAction": "MOVE_TO_POSE",
+          "enabled": true,
+          "params": {
+            "poseRole": "APPROACH",
+            "positionToleranceMm": 2,
+            "angleToleranceDeg": 1,
+            "settleMs": 200,
+            "timeoutMs": 10000,
+            "pollMs": 50,
+            "frame": "BASE",
+            "speedProfile": "NORMAL",
+            "collisionProfile": "NORMAL",
+            "maxRetries": 1,
+            "pose": {
+              "x": 600,
+              "y": -100,
+              "z": 250,
+              "rx": 180,
+              "ry": 0,
+              "rz": 0
+            }
+          },
+          "gate": false,
+          "onFail": "RETRY_PHASE"
+        },
+        {
+          "phaseId": "verifyDst",
+          "subAction": "VISION.VERIFY_PLACEMENT",
+          "enabled": true,
+          "params": {
+            "recipe": "PLACEMENT_BEFORE",
+            "cameraId": "CAM01",
+            "exposureMs": 15,
+            "gain": 1.1,
+            "timeoutMs": 5000,
+            "outputFormat": "png",
+            "simulatedPass": true,
+            "maxRetries": 0
+          },
+          "gate": true,
+          "onFail": "ABORT"
+        },
+        {
+          "phaseId": "toPlace",
+          "subAction": "MOVE_TO_POSE",
+          "enabled": true,
+          "params": {
+            "poseRole": "PLACE",
+            "positionToleranceMm": 2,
+            "angleToleranceDeg": 1,
+            "settleMs": 200,
+            "timeoutMs": 10000,
+            "pollMs": 50,
+            "frame": "BASE",
+            "speedProfile": "SLOW",
+            "collisionProfile": "SENSITIVE",
+            "maxRetries": 1,
+            "pose": {
+              "x": 600,
+              "y": -100,
+              "z": 150,
+              "rx": 180,
+              "ry": 0,
+              "rz": 0
+            }
+          },
+          "gate": false,
+          "onFail": "VERIFY_BEFORE_RETRY"
+        },
+        {
+          "phaseId": "release",
+          "subAction": "GRIP.OPEN",
+          "enabled": true,
+          "params": {
+            "targetWidthMm": 80,
+            "holdMs": 180,
+            "emptyDetectedMinWidth": 70,
+            "maxRetries": 1
+          },
+          "gate": false,
+          "onFail": "RETRY_PHASE"
+        },
+        {
+          "phaseId": "verifyEmpty",
+          "subAction": "GRIP.VERIFY_LOAD",
+          "enabled": true,
+          "params": {
+            "expectedDetected": false,
+            "minDetectedWidth": 70,
+            "maxDetectedWidth": 100,
+            "holdCheckMs": 300,
+            "pollMs": 50,
+            "requireForceFeedback": false,
+            "minForce": 0,
+            "maxRetries": 1,
+            "retryFromPhaseId": "release"
+          },
+          "gate": true,
+          "onFail": "VERIFY_BEFORE_RETRY"
+        },
+        {
+          "phaseId": "verifyPlaced",
+          "subAction": "VISION.VERIFY_PLACEMENT",
+          "enabled": true,
+          "params": {
+            "recipe": "PLACEMENT_AFTER",
+            "cameraId": "CAM01",
+            "exposureMs": 15,
+            "gain": 1.1,
+            "timeoutMs": 5000,
+            "outputFormat": "png",
+            "simulatedPass": true,
+            "maxRetries": 0
+          },
+          "gate": true,
+          "onFail": "ABORT"
+        },
+        {
+          "phaseId": "retreat",
+          "subAction": "MOVE_TO_POSE",
+          "enabled": true,
+          "params": {
+            "poseRole": "RETREAT",
+            "positionToleranceMm": 2,
+            "angleToleranceDeg": 1,
+            "settleMs": 200,
+            "timeoutMs": 10000,
+            "pollMs": 50,
+            "frame": "BASE",
+            "speedProfile": "NORMAL",
+            "collisionProfile": "NORMAL",
+            "maxRetries": 1,
+            "pose": {
+              "x": 600,
+              "y": -100,
+              "z": 350,
+              "rx": 180,
+              "ry": 0,
+              "rz": 0
+            }
+          },
+          "gate": false,
+          "onFail": "RETRY_PHASE"
+        }
+      ]
+    }
+  ]
+}

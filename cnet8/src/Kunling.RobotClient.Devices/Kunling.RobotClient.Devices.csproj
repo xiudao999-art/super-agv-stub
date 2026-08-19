@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Kunling.RobotClient.Devices</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Kunling.RobotClient.Core\Kunling.RobotClient.Core.csproj" />
+    <!-- HuayanRobotArm 的真实厂家 SDK 实现。 -->
+    <ProjectReference Include="..\..\Kunling.RobotClient.Devices.HuayanRobot\Kunling.RobotClient.Devices.HuayanRobot.csproj" />
+    <!-- HikvisionRobotChassis 使用的统一海康GBP协议客户端。 -->
+    <ProjectReference Include="..\..\Kunling.RobotClient.Devices.HikvisionMobileRobot\Kunling.RobotClient.Devices.HikvisionMobileRobot.csproj" />
+    <!-- HuayanRobot 公开继承 RobotAPI，消费它的程序集在编译期也需要解析该基类。 -->
+    <Reference Include="RobotLibrarys">
+      <HintPath>..\..\Kunling.RobotClient.Devices.HuayanRobot\Lib\RobotLibrarys.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>..\..\Kunling.RobotClient.Devices.HuayanRobot\Lib\Newtonsoft.Json.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
