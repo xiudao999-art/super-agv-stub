@@ -1,0 +1,11 @@
+{
+  "actionTemplates": [
+    {
+      "templateId": "TEST.MOVE.V1",
+      "actionType": "MOVE",
+      "phases": [
+       
+      ]
+    }
+  ]
+}
