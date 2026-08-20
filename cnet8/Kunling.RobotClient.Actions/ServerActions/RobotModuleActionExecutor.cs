@@ -59,26 +59,11 @@ public sealed class RobotModuleActionExecutor : IServerActionExecutor
             if (templateErrors.Count > 0)
                 throw new ArgumentException(
                     $"MainAction 模板安全校验失败：{string.Join(" ", templateErrors)}");
-            converted = embeddedAction switch
-                {
-                    // 从 input.MainAction 反序列化具体 MOVE 主动作，再按其中 phases 调用设备。
-                    MainAction.Move => Convert(await _robot.ExecuteMoveAsync(
-                        ParseRequired<MoveActionMessage>(command.Input).MainAction, cancellationToken), command, receivedTemplate),
-                    MainAction.ArmPick => Convert(await _robot.ExecutePickAsync(
-                        receivedTemplate, cancellationToken), command, receivedTemplate),
-                    MainAction.ArmPlace => Convert(await _robot.ExecutePlaceAsync(
-                        receivedTemplate, cancellationToken), command, receivedTemplate),
-                    MainAction.ArmPickBatch => Convert(await _robot.ExecutePickBatchAsync(
-                        receivedTemplate, cancellationToken), command, receivedTemplate),
-                    MainAction.ArmPlaceBatch => Convert(await _robot.ExecutePlaceBatchAsync(
-                        receivedTemplate, cancellationToken), command, receivedTemplate),
-                    MainAction.ArmHome => Convert(await _robot.ExecuteHomeAsync(
-                        receivedTemplate, cancellationToken), command, receivedTemplate),
-                    MainAction.VisionCapture => Convert(await _robot.ExecuteCaptureAsync(
-                        receivedTemplate, cancellationToken), command, receivedTemplate),
-                    _ => ServerActionExecutionResult.Failed(PlatformErrorCodes.UnsupportedAction,
-                        $"不支持 MainAction：{embeddedAction.ToActionType()}")
-                };
+            // 所有已注册的 L2 MainAction 使用同一条执行链：
+            // 不根据 MOVE/PICK/PLACE 等名称调用专用业务方法，只按服务器实际下发的
+            // phases 顺序解释 subAction、params、gate 和 onFail，并路由到对应组合设备。
+            converted = Convert(await _robot.ExecuteMainActionPhasesAsync(
+                receivedTemplate, cancellationToken), command, receivedTemplate);
         }
         catch (JsonException ex)
         {

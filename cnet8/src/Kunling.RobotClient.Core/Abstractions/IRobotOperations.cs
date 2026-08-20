@@ -22,6 +22,8 @@ public interface IRobotOperations
     Task<DeviceResult<BatchActionResult>> PlaceBatchAsync(ArmPlaceBatchRequest request, CancellationToken cancellationToken);
     Task<DeviceResult<BatchActionResult>> ExecutePickBatchAsync(MainActionTemplate action, CancellationToken cancellationToken);
     Task<DeviceResult<BatchActionResult>> ExecutePlaceBatchAsync(MainActionTemplate action, CancellationToken cancellationToken);
+    /// <summary>不按固定 L2 实现分流，按服务器给出的 phases 逐项解释执行。</summary>
+    Task<DeviceResult<MainActionExecutionResult>> ExecuteMainActionPhasesAsync(MainActionTemplate action, CancellationToken cancellationToken);
     Task<DeviceResult<ArmActionResult>> HomeAsync(CancellationToken cancellationToken);
     Task<DeviceResult<VisionResult>> CaptureAsync(VisionRequest request, CancellationToken cancellationToken);
 }

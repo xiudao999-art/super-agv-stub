@@ -66,9 +66,12 @@ public sealed class TcpServer : IAsyncDisposable, IDisposable
         using var inputDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(inputJson) ? "{}" : inputJson);
         var mainAction = inputDoc.RootElement.Deserialize<MainActionMessage>(ServerActionJson.Default)?.MainAction
             ?? throw new InvalidDataException("input.MainAction 不能为空。");
-        if (string.IsNullOrWhiteSpace(reuseActionInstanceId))
+        // TEST.* 是客户端校验测试包。服务端必须允许空 phases、非法组合等内容真正到达机器人，
+        // 否则无法验证客户端的校验、错误码和状态上报。普通业务动作仍执行发送前校验。
+        var isClientValidationTest = mainAction.TemplateId?.StartsWith("TEST.", StringComparison.OrdinalIgnoreCase) == true;
+        if (string.IsNullOrWhiteSpace(reuseActionInstanceId) && !isClientValidationTest)
             MainActionTemplateValidator.EnsureValid(mainAction);
-        else
+        else if (!string.IsNullOrWhiteSpace(reuseActionInstanceId) && !isClientValidationTest)
         {
             var resumeErrors = MainActionTemplateValidator.ValidateResume(mainAction);
             if (resumeErrors.Count > 0) throw new InvalidDataException(string.Join(" ", resumeErrors));

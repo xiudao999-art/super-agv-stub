@@ -18,7 +18,7 @@ public sealed class MoveAction : MainActionTemplate
         ActionType = MainAction.Move;
         Phases =
         [
-            new L1SubActionMoveToPose()
+            new L1SubActionMoveToMapPoint()
         ];
     }
 

@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Kunling.RobotClient.Core.Abstractions;
 using Kunling.RobotClient.Core.Controller.L1SubActions.L1SubActionTemplates;
+using Kunling.RobotClient.Core.Controller.Templates.MoveActionTemplates;
 using Kunling.RobotClient.Core.Models;
 
 namespace Kunling.RobotClient.Core.Controller.Templates;
@@ -385,9 +386,11 @@ public sealed class ActionTemplateExecutor(IChassis chassis, IArm arm, IVision v
     private async Task<PhaseResult> ExecutePhaseAsync(PhaseActionTemplate phase, ActionTemplateContext context,
         CancellationToken ct) => phase.SubAction switch
     {
-        SubAction.MOVE_TO_MAP_POINT => context.MoveRequest is null
-            ? new(false, null, new DeviceError(PlatformErrorCodes.InvalidActionInput, $"phase {phase.PhaseId} 缺少 MOVE request。"))
-            : Convert(await chassis.MoveAsync(context.MoveRequest, ct), "CHASSIS", chassis.Vendor, chassis.Model),
+        // MOVE 的完整设备请求由当前 phase.params 直接提供。
+        // 不再要求调用方另外创建或传入 context.MoveRequest，避免同一份参数存在两套来源。
+        SubAction.MOVE_TO_MAP_POINT => Convert(await chassis.MoveAsync(
+            L1SubActionMoveToMapPoint.ResolveRequest(phase), ct),
+            "CHASSIS", chassis.Vendor, chassis.Model),
         SubAction.MOVE_TO_POSE => Convert(await arm.MoveToPoseAsync(
             L1SubActionMoveToPose.ResolveRequest(phase, context.Station, context.Point), ct),
             "ARM", arm.Vendor, arm.Model),

@@ -19,6 +19,11 @@
     <None Update="Configs\ARM.HOME.Templates.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Configs\VISION.CAPTURE.Templates.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Configs\ActionConfiguration.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Configs\TestTemplates\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Configs\TestTemplates\" />
   </ItemGroup>
 
 </Project>

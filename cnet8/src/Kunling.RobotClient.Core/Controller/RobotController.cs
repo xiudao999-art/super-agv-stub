@@ -204,6 +204,33 @@ public sealed class RobotController : IRobotOperations, IRobotExecutionProgressS
         return await ExecuteEmbeddedBatchAsync(action, pick: false, ct);
     }
 
+    /// <summary>
+    /// 按服务器完整下发的 phases 执行任意已注册 MainAction。
+    /// actionType 只表示 L2 能力名称；实际行为完全由有序 phases 决定，
+    /// 各 SubAction 由通用执行器路由到组合设备。
+    /// </summary>
+    public async Task<DeviceResult<MainActionExecutionResult>> ExecuteMainActionPhasesAsync(
+        MainActionTemplate action, CancellationToken ct)
+    {
+        if (action is null || action.Phases.Count == 0)
+            return DeviceResult<MainActionExecutionResult>.Fail(
+                new(PlatformErrorCodes.InvalidActionInput, "MainAction.phases 不能为空。"));
+
+        var station = ReadPhaseString(action, "station") ?? "GLOBAL";
+        var point = ReadPhaseString(action, "point");
+        var execution = await _executor.ExecuteAsync(action, new(station, point), ct);
+        if (!execution.Success)
+            return DeviceResult<MainActionExecutionResult>.Fail(execution.Error!, execution.Steps);
+
+        var completed = execution.Steps.Count(x =>
+            x.State.Equals("SUCCEEDED", StringComparison.OrdinalIgnoreCase) ||
+            x.State.Equals("RESUMED_SUCCEEDED", StringComparison.OrdinalIgnoreCase) ||
+            x.State.Equals("DISABLED", StringComparison.OrdinalIgnoreCase));
+        await EmitAsync("MAIN_ACTION_DONE", new { action.TemplateId, action.ActionType, Completed = completed }, ct);
+        return DeviceResult<MainActionExecutionResult>.Ok(
+            new(completed, action.Phases.Count, execution.Output), execution.Steps);
+    }
+
     private async Task<DeviceResult<BatchActionResult>> ExecuteEmbeddedBatchAsync(
         MainActionTemplate action, bool pick, CancellationToken ct)
     {

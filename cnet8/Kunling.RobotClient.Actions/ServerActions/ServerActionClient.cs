@@ -27,9 +27,11 @@ public sealed class ServerActionClient : IAsyncDisposable
     private long _heartbeatSequence;
     private DateTimeOffset _lastPongAt;
     private HashSet<string> _acceptedCapabilities = new(StringComparer.OrdinalIgnoreCase);
-    private ActionCommand? _activeCommand;
-    // 单机器人客户端只保留一个未结束的 MainAction；HANG/可恢复 ERROR 时持续占有该上下文。
-    private ActionCommand? _retainedMainAction;
+    // 单机器人客户端只有一个 MainAction 运行槽。槽中同时保存原始命令和已经解析的
+    // MainAction，后续执行、忙碌应答、HANG 恢复都引用同一份动作快照。
+    private CachedMainAction? _activeMainAction;
+    // HANG/可恢复 ERROR 时不释放动作快照；仅允许相同 actionInstanceId 继续失败 Phase。
+    private CachedMainAction? _retainedMainAction;
 
     public ServerActionClient(
         ServerActionOptions options,
@@ -183,7 +185,7 @@ public sealed class ServerActionClient : IAsyncDisposable
                         ?? throw new InvalidDataException("TERMINATE_ACTION为空");
                     if (ValidateSession(terminate.SessionId) &&
                         terminate.RobotId.Equals(_options.RobotId, StringComparison.OrdinalIgnoreCase) &&
-                        Volatile.Read(ref _retainedMainAction)?.ActionInstanceId.Equals(
+                        Volatile.Read(ref _retainedMainAction)?.Command.ActionInstanceId.Equals(
                             terminate.ActionInstanceId, StringComparison.OrdinalIgnoreCase) == true)
                     {
                         Volatile.Write(ref _retainedMainAction, null);
@@ -210,7 +212,7 @@ public sealed class ServerActionClient : IAsyncDisposable
 
         var retained = Volatile.Read(ref _retainedMainAction);
         var isPhaseResume = retained is not null &&
-            retained.ActionInstanceId.Equals(command.ActionInstanceId, StringComparison.OrdinalIgnoreCase);
+            retained.Command.ActionInstanceId.Equals(command.ActionInstanceId, StringComparison.OrdinalIgnoreCase);
         if (!isPhaseResume && _journal.TryGet(command.ActionInstanceId, out var historical) && historical is not null)
         {
             // actionInstanceId 是幂等键，重复命令只重放历史结果，不再次驱动设备。
@@ -220,8 +222,13 @@ public sealed class ServerActionClient : IAsyncDisposable
         }
         if (isPhaseResume) _journal.Remove(command.ActionInstanceId);
 
+        MainActionTemplate receivedMainAction;
         string actionType;
-        try { actionType = ReadMainActionType(command.Input); }
+        try
+        {
+            receivedMainAction = ReadMainAction(command.Input);
+            actionType = receivedMainAction.ActionType.ToActionType();
+        }
         catch (Exception ex) when (ex is ArgumentException or JsonException)
         {
             await SendTerminalEventAsync(stream, command,
@@ -240,13 +247,13 @@ public sealed class ServerActionClient : IAsyncDisposable
         // HANG 主动作仍保留在客户端单例上下文中；仅相同 actionInstanceId 可以断点恢复。
         if (retained is not null && !isPhaseResume)
         {
-            var retainedType = ReadMainActionType(retained.Input);
-            var retainedState = await _executor.QueryAsync(retained.ActionInstanceId,
-                retained.DeviceCommandId, sessionCancellation);
+            var retainedType = retained.MainAction.ActionType.ToActionType();
+            var retainedState = await _executor.QueryAsync(retained.Command.ActionInstanceId,
+                retained.Command.DeviceCommandId, sessionCancellation);
             var retainedStep = retainedState.ResolvedSteps?.LastOrDefault();
             var busy = ServerActionExecutionResult.Busy(
-                $"机器人保留未结束动作 {retainedType}，actionInstanceId={retained.ActionInstanceId}。",
-                new ActionFailureContext(retained.ActionInstanceId, retainedType,
+                $"机器人保留未结束动作 {retainedType}，actionInstanceId={retained.Command.ActionInstanceId}。",
+                new ActionFailureContext(retained.Command.ActionInstanceId, retainedType,
                     PhaseId: retainedStep?.PhaseId, SubAction: retainedStep?.SubAction,
                     UserChoices: ["TERMINATE_REQUEST"], MainActionState: retainedState.State,
                     SubActionState: retainedStep?.State));
@@ -257,17 +264,17 @@ public sealed class ServerActionClient : IAsyncDisposable
         // 不把新动作静默排队：机器人被占用时立即回复 BUSY，并带回当前动作信息。
         if (!await _actionLock.WaitAsync(0, sessionCancellation))
         {
-            var active = Volatile.Read(ref _activeCommand);
-            var activeType = active is null ? "UNKNOWN" : ReadMainActionType(active.Input);
+            var active = Volatile.Read(ref _activeMainAction);
+            var activeType = active is null ? "UNKNOWN" : active.MainAction.ActionType.ToActionType();
             ServerActionQueryResult? activeState = null;
             if (active is not null)
-                activeState = await _executor.QueryAsync(active.ActionInstanceId,
-                    active.DeviceCommandId, sessionCancellation);
+                activeState = await _executor.QueryAsync(active.Command.ActionInstanceId,
+                    active.Command.DeviceCommandId, sessionCancellation);
             var activeStep = activeState?.ResolvedSteps?.LastOrDefault();
             var busy = ServerActionExecutionResult.Busy(
                 active is null ? "机器人正在执行其他动作。" :
-                    $"机器人正在执行 {activeType}，actionInstanceId={active.ActionInstanceId}。",
-                new ActionFailureContext(active?.ActionInstanceId ?? string.Empty, activeType,
+                    $"机器人正在执行 {activeType}，actionInstanceId={active.Command.ActionInstanceId}。",
+                new ActionFailureContext(active?.Command.ActionInstanceId ?? string.Empty, activeType,
                     PhaseId: activeStep?.PhaseId, SubAction: activeStep?.SubAction,
                     UserChoices: ["RETRY_LATER", "TERMINATE_REQUEST"],
                     MainActionState: activeState?.State ?? MainActionState.Running,
@@ -279,7 +286,8 @@ public sealed class ServerActionClient : IAsyncDisposable
         ServerActionExecutionResult? completedResult = null;
         try
         {
-            Volatile.Write(ref _activeCommand, command);
+            var activeMainAction = new CachedMainAction(command, receivedMainAction);
+            Volatile.Write(ref _activeMainAction, activeMainAction);
             // 动作进入串行执行区后立即切换为 EXECUTING；后续每个 3 秒心跳都会携带该状态。
             if (_snapshotProvider is IRobotActivitySnapshotProvider activitySnapshot)
                 activitySnapshot.SetCurrentAction(command.ActionInstanceId,
@@ -310,7 +318,9 @@ public sealed class ServerActionClient : IAsyncDisposable
             if (keepForRecovery)
             {
                 // 首次失败时缓存完整 MainAction；恢复命令只包含剩余 phases，不能覆盖完整快照。
-                if (retained is null) Volatile.Write(ref _retainedMainAction, command);
+                if (retained is null)
+                    Volatile.Write(ref _retainedMainAction,
+                        Volatile.Read(ref _activeMainAction));
                 if (_snapshotProvider is IRobotActivitySnapshotProvider activitySnapshot)
                     activitySnapshot.SetCurrentAction(command.ActionInstanceId,
                         completedResult!.State.ToString().ToUpperInvariant());
@@ -322,23 +332,25 @@ public sealed class ServerActionClient : IAsyncDisposable
                     activitySnapshot.SetCurrentAction(null);
             }
 
-            Volatile.Write(ref _activeCommand, null);
+            Volatile.Write(ref _activeMainAction, null);
             _actionLock.Release();
             _inFlight.TryRemove(command.ActionInstanceId, out _);
         }
     }
 
-    private static string ReadMainActionType(JsonElement input)
+    private static MainActionTemplate ReadMainAction(JsonElement input)
     {
         if (input.ValueKind != JsonValueKind.Object ||
             !input.TryGetProperty("MainAction", out var mainAction) ||
-            mainAction.ValueKind != JsonValueKind.Object ||
-            !mainAction.TryGetProperty("actionType", out var actionType) ||
-            actionType.ValueKind != JsonValueKind.String ||
-            string.IsNullOrWhiteSpace(actionType.GetString()))
-            throw new ArgumentException("COMMAND.input.MainAction.actionType 不能为空。");
-        return actionType.GetString()!;
+            mainAction.ValueKind != JsonValueKind.Object)
+            throw new ArgumentException("COMMAND.input.MainAction 不能为空。");
+
+        return mainAction.Deserialize<MainActionTemplate>(ServerActionJson.Default)
+               ?? throw new ArgumentException("COMMAND.input.MainAction 无法解析。");
     }
+
+    private static string ReadMainActionType(JsonElement input) =>
+        ReadMainAction(input).ActionType.ToActionType();
 
     private async Task ReplyActionStatusAsync(NetworkStream stream, QueryActionRequest query, CancellationToken cancellationToken)
     {
@@ -472,4 +484,10 @@ public sealed class ServerActionClient : IAsyncDisposable
         public ValueTask ReportRunningAsync(IReadOnlyList<ResolvedStep>? steps = null, JsonElement? evidence = null, CancellationToken cancellationToken = default) =>
             owner.SendRunningAsync(stream, command, steps, evidence, cancellationToken);
     }
+
+    /// <summary>
+    /// 客户端唯一 MainAction 运行快照。Command 保存协议身份和超时信息，MainAction 保存
+    /// 已解析的有序 Phase；失败恢复时必须继续使用原 actionInstanceId 和原完整动作。
+    /// </summary>
+    private sealed record CachedMainAction(ActionCommand Command, MainActionTemplate MainAction);
 }

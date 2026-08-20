@@ -143,6 +143,8 @@ public sealed record ArmPlaceBatchRequest(string Station, IReadOnlyList<BatchSlo
     string ReleaseProfile = "DEFAULT_PLACE", string CacheAssignMode = "EXPLICIT_MAP",
     IReadOnlyList<string>? AvailableCacheSlots = null);
 public sealed record BatchActionResult(int CompletedCount, int TotalCount, IReadOnlyList<string> CompletedSlots);
+/// <summary>服务器自定义 Phase 组合的通用执行结果；详细证据保存在 DeviceResult.Steps。</summary>
+public sealed record MainActionExecutionResult(int CompletedPhaseCount, int TotalPhaseCount, object? LastOutput = null);
 public sealed record VisionRequest(
     string? Station = null,
     string? Recipe = null,

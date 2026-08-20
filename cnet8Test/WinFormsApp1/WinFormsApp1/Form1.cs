@@ -27,7 +27,7 @@ public partial class Form1 : Form
         _server.RobotsChanged += (_, _) => RefreshRobots();
         _server.ServerStopped += (_, _) => SetRunning(false);
         _server.ActionAttentionRequired += Server_ActionAttentionRequired;
-        cboAction.Items.AddRange(["MOVE", "ARM.PICK", "ARM.PLACE", "ARM.PICK_BATCH", "ARM.PLACE_BATCH", "ARM.HOME", "VISION.CAPTURE"]);
+        cboAction.Items.AddRange(["MOVE", "ARM.PICK", "ARM.PLACE", "ARM.PICK_BATCH", "ARM.PLACE_BATCH", "ARM.HOME", "VISION.CAPTURE", "TEST"]);
         cboAction.SelectedIndexChanged += (_, _) => SetActionInputExample();
         cboAction.SelectedIndex = 0;
         Shown += (_, _) => btnStart.PerformClick();
@@ -168,60 +168,25 @@ public partial class Form1 : Form
 
         try
         {
-            // MOVE 必须先由用户从服务器站点档案中确认目标，取消窗口时不发送命令。
-            if (cboAction.Text == "MOVE")
-            {
-                // MOVE 点位统一读取简化后的 MOVE.Templates.json，不再使用旧 position.json。
-                var path = Path.Combine(AppContext.BaseDirectory, "Configs", "MOVE.Templates.json");
-                var positions = MovePositionDialog.LoadPositions(path);
-                using var dialog = new MovePositionDialog(positions);
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                var point = dialog.SelectedPositionItem
-                    ?? throw new InvalidOperationException("没有选择 MOVE 点位。");
-                var moveAction = new MoveAction(new MoveRequest(
-                    point.Name,
-                    point.Speed,
-                    new RobotPose(point.X, point.Y, point.Yaw, point.Map),
-                    new MoveArrivalRequest(point.Arrival.PositionToleranceMm,
-                        point.Arrival.AngleToleranceDeg, point.Arrival.TimeoutMs)));
-                // Input 中序列化 { MainAction: { actionType, phases } }；具体参数已经写入 phase.params。
-                txtInput.Text = JsonSerializer.Serialize(
-                    new MoveActionMessage(moveAction), ServerActionJson.Default);
-            }
-            else if (cboAction.Text == "ARM.PICK")
-            {
-                var path = Path.Combine(AppContext.BaseDirectory, "Configs", "ARM.PICK.Templates.json");
-                var templates = ArmPickTemplateDialog.LoadTemplates(path);
-                using var dialog = new ArmPickTemplateDialog(templates);
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                var selected = dialog.SelectedTemplate
-                    ?? throw new InvalidOperationException("没有选择 ARM.PICK 模板。");
-                txtInput.Text = BuildMainAction("ARM.PICK", "ARM.PICK.Templates.json", txtInput.Text,
-                    selected.TemplateId);
-            }
-            else if (cboAction.Text == "ARM.PLACE")
-            {
-                txtInput.Text = BuildMainAction("ARM.PLACE", "ARM.PLACE.Templates.json", txtInput.Text);
-            }
-            else if (cboAction.Text == "ARM.HOME")
-            {
-                txtInput.Text = BuildMainAction("ARM.HOME", "ARM.HOME.Templates.json", txtInput.Text);
-            }
-            else if (cboAction.Text == "VISION.CAPTURE")
-            {
-                txtInput.Text = BuildMainAction("VISION.CAPTURE", "VISION.CAPTURE.Templates.json", txtInput.Text);
-            }
-            else if (cboAction.Text == "ARM.PICK_BATCH")
-            {
-                txtInput.Text = BuildBatchMainAction(pick: true, txtInput.Text);
-            }
-            else if (cboAction.Text == "ARM.PLACE_BATCH")
-            {
-                txtInput.Text = BuildBatchMainAction(pick: false, txtInput.Text);
-            }
+            // 所有入口统一从新生成的 TestTemplates JSON 选择完整 MainAction。
+            // 下拉框只用于筛选 actionType；TEST 显示全部类型。旧 MOVE 点位、ARM.PICK 专用
+            // 对话框及固定 ARM.*.Templates.json 组合解析不再参与下发流程。
+            var selectedAction = cboAction.Text;
+            var directory = Path.Combine(AppContext.BaseDirectory, "Configs", "TestTemplates");
+            var allTemplates = TestTemplateDialog.LoadFiles(directory);
+            var actionTypeFilter = selectedAction == "TEST" ? null : selectedAction;
+            var visibleTemplates = actionTypeFilter is null
+                ? allTemplates
+                : allTemplates.Where(x => string.Equals(x.ActionType, actionTypeFilter,
+                    StringComparison.OrdinalIgnoreCase)).ToArray();
+            using var dialog = new TestTemplateDialog(directory, visibleTemplates, actionTypeFilter);
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var selected = dialog.SelectedTemplate
+                ?? throw new InvalidOperationException("没有选择 MainAction 模板文件。");
+            txtInput.Text = BuildTestMainAction(selected.FullPath, out var actionTypeToSend);
 
             using var _ = JsonDocument.Parse(txtInput.Text);
-            var actionId = await _server.SendCommandAsync(robot.RobotId, cboAction.Text, "1.0", ExecutionMode.Package,
+            var actionId = await _server.SendCommandAsync(robot.RobotId, actionTypeToSend, "1.0", ExecutionMode.Package,
                 txtInput.Text, (int)numTimeout.Value);
             AppendLog($"命令已发送，actionInstanceId={actionId}，JSON={txtInput.Text.Replace(Environment.NewLine, " ")}");
         }
@@ -299,6 +264,25 @@ public partial class Form1 : Form
         value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 
     /// <summary>
+    /// TEST 是服务端测试入口而不是协议动作。读取文件中的完整 MainAction，并返回其真实
+    /// actionType 用于能力检查；客户端收到 templateId=TEST.* 后通用执行全部 phases。
+    /// </summary>
+    private static string BuildTestMainAction(string path, out string actionType)
+    {
+        if (!File.Exists(path)) throw new FileNotFoundException("找不到 TEST 模板文件。", path);
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        if (!document.RootElement.TryGetProperty("actionTemplates", out var templates) ||
+            templates.ValueKind != JsonValueKind.Array || templates.GetArrayLength() != 1)
+            throw new InvalidDataException("Test.Templates.json 必须且只能包含一个待测试 MainAction。");
+        // TEST 的发送端只做 JSON 可解析检查，不校验 phases；空 Phase、错误引用等场景
+        // 必须真正发给机器人，由客户端统一校验并通过 ActionEvent 上报。
+        var template = templates[0].Deserialize<MainActionTemplate>(ServerActionJson.Default)
+            ?? throw new InvalidDataException("TEST MainAction 无法反序列化。");
+        actionType = template.ActionType.ToActionType();
+        return JsonSerializer.Serialize(new MainActionMessage(template), ServerActionJson.Default);
+    }
+
+    /// <summary>
     /// 服务端根据 slots 和单次 PICK/PLACE 模板展开批量 phases，发送端不再下发旧的裸请求。
     /// 展开结果保证 SAFE/APPROACH 一次、槽位核心序列 N 次、RETREAT 一次。
     /// </summary>
@@ -339,38 +323,12 @@ public partial class Form1 : Form
 
     private void SetActionInputExample()
     {
-        txtInput.Text = cboAction.Text switch
+        txtInput.Text = new JsonObject
         {
-            "MOVE" => JsonSerializer.Serialize(
-                new MoveActionMessage(new MoveAction(new MoveRequest("P01", 0.5))),
-                ServerActionJson.Default),
-            "ARM.PICK" => """
-                          { "station": "PICK_01", "point": "P01", "graspProfile": "DEFAULT_PICK", "expectedMaterial": "MATERIAL_01", "actionPolicy": "SAFE_DEFAULT" }
-                          """,
-            "ARM.PLACE" => """
-                           { "station": "PLACE_01", "point": "P01" }
-                           """,
-            "ARM.PICK_BATCH" => """
-                                {
-                                  "station": "PICK_01",
-                                  "slots": [ { "slotId": "S01", "point": "P01" }, { "slotId": "S02", "point": "P02" } ],
-                                  "orderPolicy": "RANK_ASC",
-                                  "policy": { "maxRetries": 1, "retryMode": "VERIFY_BEFORE_RETRY", "onExhaust": "HOLD" }
-                                }
-                                """,
-            "ARM.PLACE_BATCH" => """
-                                 {
-                                   "station": "PLACE_01",
-                                   "slots": [ { "slotId": "S01", "point": "P01" }, { "slotId": "S02", "point": "P02" } ],
-                                   "orderPolicy": "RANK_ASC",
-                                   "policy": { "maxRetries": 1, "retryMode": "VERIFY_BEFORE_RETRY", "onExhaust": "HOLD" }
-                                 }
-                                 """,
-            "VISION.CAPTURE" => """
-                                { "station": "CAMERA_01", "recipe": "DEFAULT_CAPTURE" }
-                                """,
-            _ => "{}"
-        };
+            ["templateSource"] = "Configs/TestTemplates",
+            ["actionTypeFilter"] = cboAction.Text == "TEST" ? "ALL" : cboAction.Text,
+            ["说明"] = "点击下发后从弹窗选择新模板 JSON，并发送其中的完整 MainAction"
+        }.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
     }
 
     private void SetRunning(bool running)
