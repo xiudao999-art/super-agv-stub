@@ -87,6 +87,39 @@ public sealed record DeviceResult<T>(bool Success, T? Value = default, DeviceErr
 
 public sealed record OperationStep(int Sequence, string PhaseId, string SubAction, string State,
     object? Evidence = null, string? SlotId = null, string? CacheSlot = null, string? PoseRef = null);
+
+/// <summary>
+/// 设备执行过程中产生的结构化 phase 进度类型。
+/// 日志文本只用于现场诊断，服务端联调时间线必须消费这些稳定枚举，避免依赖可变文案。
+/// </summary>
+public enum OperationProgressType
+{
+    PhaseStarted,
+    PhaseSucceeded,
+    PhaseFailed,
+    PhaseRetryPending,
+    PhaseSkipped,
+    PhaseVerification,
+    PhasePolicyApplied,
+    EvidenceCaptured
+}
+
+/// <summary>
+/// 单次 phase 执行事实。OperationStep 是累计结果快照，本对象描述某一时刻具体发生了什么。
+/// </summary>
+public sealed record OperationProgress(
+    OperationProgressType Type,
+    int StepSequence,
+    string PhaseId,
+    string SubAction,
+    string StepState,
+    DateTimeOffset OccurredAt,
+    int? Attempt = null,
+    DateTimeOffset? StartedAt = null,
+    DateTimeOffset? CompletedAt = null,
+    long? DurationMs = null,
+    object? Evidence = null,
+    DeviceError? DeviceError = null);
 /// <summary>
 /// 主动作执行策略。CompletedPhaseIds 由服务器持久化后在恢复命令中回传，
 /// 客户端据此跳过已经成功且具有物理证据的 phase，实现从确定断点继续执行。

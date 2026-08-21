@@ -29,10 +29,11 @@ public interface IRobotOperations
 }
 
 /// <summary>
-/// 机器人主动作执行进度源。每完成一次 phase 尝试（包括失败、复核、跳过）即发布快照，
-/// 供通信层缓存当前 Action/SubAction 状态并实时上报服务器。
+/// 机器人主动作执行进度源。StepChanged 提供累计结果快照，ProgressChanged 提供开始、结束、
+/// 重试和异常策略等结构化执行事实，供通信层实时上报服务器。
 /// </summary>
 public interface IRobotExecutionProgressSource
 {
     event EventHandler<OperationStep>? StepChanged;
+    event EventHandler<OperationProgress>? ProgressChanged;
 }

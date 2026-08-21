@@ -26,24 +26,36 @@ public sealed class RobotModuleActionExecutor : IServerActionExecutor
         _states[command.ActionInstanceId] = new(MainActionState.Running);
         var liveSteps = new List<ResolvedStep>();
         var liveStepsLock = new object();
+        var progressReports = new List<Task>();
+        var progressReportsLock = new object();
 
-        // Core 每产生一个 phase 状态，就立即更新本地查询缓存并向服务器发送 Running 快照。
-        // 事件是同步产生的，因此这里只复制不可变快照；网络发送异步执行且自行吞掉断线异常，
-        // 不能反向阻塞或破坏设备动作线程。
+        // StepChanged 只维护累计结果快照；ProgressChanged 才负责发送实时结构化事件。
+        // 两个事件由 Core 同步按顺序产生，因此完成事件发送时快照已经包含刚完成的步骤。
         void OnStepChanged(object? _, OperationStep step)
         {
-            IReadOnlyList<ResolvedStep> snapshot;
             lock (liveStepsLock)
             {
                 liveSteps.Add(ConvertStep(step));
-                snapshot = liveSteps.ToArray();
-                _states[command.ActionInstanceId] = new(MainActionState.Running, ResolvedSteps: snapshot);
+                _states[command.ActionInstanceId] = new(MainActionState.Running,
+                    ResolvedSteps: liveSteps.ToArray());
             }
-            _ = ReportProgressSafelyAsync(context, snapshot, cancellationToken);
+        }
+
+        void OnProgressChanged(object? _, OperationProgress progress)
+        {
+            IReadOnlyList<ResolvedStep> snapshot;
+            lock (liveStepsLock) snapshot = liveSteps.ToArray();
+            var report = ReportProgressSafelyAsync(
+                context, snapshot, ConvertProgress(progress), cancellationToken);
+            lock (progressReportsLock) progressReports.Add(report);
         }
 
         var progressSource = _robot as IRobotExecutionProgressSource;
-        if (progressSource is not null) progressSource.StepChanged += OnStepChanged;
+        if (progressSource is not null)
+        {
+            progressSource.StepChanged += OnStepChanged;
+            progressSource.ProgressChanged += OnProgressChanged;
+        }
         ServerActionExecutionResult converted;
         try
         {
@@ -75,8 +87,18 @@ public sealed class RobotModuleActionExecutor : IServerActionExecutor
         }
         finally
         {
-            if (progressSource is not null) progressSource.StepChanged -= OnStepChanged;
+            if (progressSource is not null)
+            {
+                progressSource.StepChanged -= OnStepChanged;
+                progressSource.ProgressChanged -= OnProgressChanged;
+            }
         }
+
+        // 设备执行线程不等待单条网络写入，但整包终态必须排在所有 phase 事件之后。
+        // ReportProgressSafelyAsync 已隔离断线异常，因此这里只保证顺序，不改变物理执行结果。
+        Task[] pendingReports;
+        lock (progressReportsLock) pendingReports = progressReports.ToArray();
+        await Task.WhenAll(pendingReports);
 
         _states[command.ActionInstanceId] = new(converted.State, converted.PhysicalResult, converted.ResolvedSteps, converted.Error);
         return converted;
@@ -87,10 +109,31 @@ public sealed class RobotModuleActionExecutor : IServerActionExecutor
         step.Evidence is null ? null : JsonSerializer.SerializeToElement(step.Evidence, ServerActionJson.Default),
         step.SlotId, step.CacheSlot, step.PoseRef);
 
+    private static PhaseExecutionEvent ConvertProgress(OperationProgress progress) => new(
+        progress.Type switch
+        {
+            OperationProgressType.PhaseStarted => "PHASE_STARTED",
+            OperationProgressType.PhaseSucceeded => "PHASE_SUCCEEDED",
+            OperationProgressType.PhaseFailed => "PHASE_FAILED",
+            OperationProgressType.PhaseRetryPending => "PHASE_RETRY_PENDING",
+            OperationProgressType.PhaseSkipped => "PHASE_SKIPPED",
+            OperationProgressType.PhaseVerification => "PHASE_VERIFICATION",
+            OperationProgressType.PhasePolicyApplied => "PHASE_POLICY_APPLIED",
+            OperationProgressType.EvidenceCaptured => "EVIDENCE_CAPTURED",
+            _ => throw new ArgumentOutOfRangeException(nameof(progress.Type), progress.Type, "未知 phase 进度类型。")
+        },
+        progress.StepSequence, progress.PhaseId, progress.SubAction, progress.StepState,
+        progress.OccurredAt, progress.Attempt, progress.StartedAt, progress.CompletedAt,
+        progress.DurationMs,
+        progress.Evidence is null
+            ? null : JsonSerializer.SerializeToElement(progress.Evidence, ServerActionJson.Default),
+        progress.DeviceError);
+
     private static async Task ReportProgressSafelyAsync(IServerActionExecutionContext context,
-        IReadOnlyList<ResolvedStep> steps, CancellationToken cancellationToken)
+        IReadOnlyList<ResolvedStep> steps, PhaseExecutionEvent phaseEvent,
+        CancellationToken cancellationToken)
     {
-        try { await context.ReportRunningAsync(steps, cancellationToken: cancellationToken); }
+        try { await context.ReportRunningAsync(steps, phaseEvent, cancellationToken); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch
         {

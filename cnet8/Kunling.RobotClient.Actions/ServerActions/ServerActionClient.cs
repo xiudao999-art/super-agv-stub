@@ -295,8 +295,10 @@ public sealed class ServerActionClient : IAsyncDisposable
 
             // 标准状态顺序：ACCEPTED -> RUNNING -> 终态。
             if (!isPhaseResume)
-                await SendEventAsync(stream, command, MainActionState.Accepted, null, null, null, sessionCancellation);
-            await SendEventAsync(stream, command, MainActionState.Running, null, null, null, sessionCancellation);
+                await SendEventAsync(stream, command, MainActionState.Accepted,
+                    null, null, null, null, sessionCancellation);
+            await SendEventAsync(stream, command, MainActionState.Running,
+                null, null, null, null, sessionCancellation);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(sessionCancellation);
             timeout.CancelAfter(Math.Max(1_000, command.TimeoutMs));
             var context = new ExecutionContext(this, stream, command);
@@ -364,10 +366,10 @@ public sealed class ServerActionClient : IAsyncDisposable
         var queried = await _executor.QueryAsync(query.ActionInstanceId, query.DeviceCommandId, cancellationToken);
         var report = CreateReportState(query.ActionInstanceId,
             queried.Error?.Context?.ActionType ?? "UNKNOWN", queried.State,
-            queried.ResolvedSteps, queried.Error);
+            queried.ResolvedSteps, queried.Error, null);
         var status = new ActionEvent("1.0", ServerMessageTypes.ActionStatus, NewMessageId(), _sessionId!, _options.RobotId,
             query.ActionInstanceId, query.DeviceCommandId, NextEventSequence(), queried.State, queried.ResolvedSteps,
-            queried.PhysicalResult, queried.Error, DateTimeOffset.UtcNow, report);
+            queried.PhysicalResult, queried.Error, DateTimeOffset.UtcNow, null, report);
         await SendAsync(stream, status, cancellationToken);
     }
 
@@ -385,30 +387,38 @@ public sealed class ServerActionClient : IAsyncDisposable
         }
     }
 
-    private async ValueTask SendRunningAsync(NetworkStream stream, ActionCommand command, IReadOnlyList<ResolvedStep>? steps, JsonElement? evidence, CancellationToken cancellationToken) =>
-        await SendEventAsync(stream, command, MainActionState.Running, steps, evidence, null, cancellationToken);
+    private async ValueTask SendRunningAsync(NetworkStream stream, ActionCommand command,
+        IReadOnlyList<ResolvedStep>? steps, PhaseExecutionEvent? phaseEvent,
+        CancellationToken cancellationToken) =>
+        await SendEventAsync(stream, command, MainActionState.Running, steps,
+            null, null, phaseEvent, cancellationToken);
 
     private async Task SendTerminalEventAsync(NetworkStream stream, ActionCommand command, ServerActionExecutionResult result, CancellationToken cancellationToken)
     {
         // 终态先保存再发送，使服务器重发命令时能够安全恢复结果。
-        var actionEvent = CreateEvent(command, result.State, result.ResolvedSteps, result.PhysicalResult, result.Error);
+        var actionEvent = CreateEvent(command, result.State, result.ResolvedSteps,
+            result.PhysicalResult, result.Error, null);
         _journal.Save(actionEvent);
         await SendAsync(stream, actionEvent, cancellationToken);
     }
 
     private Task SendEventAsync(NetworkStream stream, ActionCommand command, MainActionState state,
-        IReadOnlyList<ResolvedStep>? steps, JsonElement? physicalResult, ActionError? error, CancellationToken cancellationToken) =>
-        SendAsync(stream, CreateEvent(command, state, steps, physicalResult, error), cancellationToken);
+        IReadOnlyList<ResolvedStep>? steps, JsonElement? physicalResult, ActionError? error,
+        PhaseExecutionEvent? phaseEvent, CancellationToken cancellationToken) =>
+        SendAsync(stream, CreateEvent(command, state, steps, physicalResult, error, phaseEvent), cancellationToken);
 
-    private ActionEvent CreateEvent(ActionCommand command, MainActionState state, IReadOnlyList<ResolvedStep>? steps, JsonElement? physicalResult, ActionError? error) =>
+    private ActionEvent CreateEvent(ActionCommand command, MainActionState state,
+        IReadOnlyList<ResolvedStep>? steps, JsonElement? physicalResult, ActionError? error,
+        PhaseExecutionEvent? phaseEvent) =>
         new("1.0", ServerMessageTypes.ActionEvent, NewMessageId(), _sessionId!, _options.RobotId,
             command.ActionInstanceId, command.DeviceCommandId, NextEventSequence(), state, steps, physicalResult, error,
-            DateTimeOffset.UtcNow, CreateReportState(command.ActionInstanceId,
-                ReadMainActionType(command.Input), state, steps, error));
+            DateTimeOffset.UtcNow, phaseEvent, CreateReportState(command.ActionInstanceId,
+                ReadMainActionType(command.Input), state, steps, error, phaseEvent));
 
     /// <summary>把分散的执行现场统一封装为服务器直接消费的状态模型。</summary>
     private ReportRobotStateModel CreateReportState(string eventActionInstanceId, string actionType,
-        MainActionState eventState, IReadOnlyList<ResolvedStep>? steps, ActionError? error)
+        MainActionState eventState, IReadOnlyList<ResolvedStep>? steps, ActionError? error,
+        PhaseExecutionEvent? phaseEvent)
     {
         var failure = error?.Context;
         var latestStep = steps?.LastOrDefault();
@@ -416,14 +426,16 @@ public sealed class ServerActionClient : IAsyncDisposable
             ? eventActionInstanceId : failure.ActionInstanceId;
         var mainState = failure?.MainActionState ??
                         (eventState == MainActionState.Busy ? MainActionState.Running : eventState);
-        var subActionName = failure?.SubAction ?? latestStep?.SubAction;
+        var subActionName = failure?.SubAction ?? phaseEvent?.SubAction ?? latestStep?.SubAction;
+        var phaseDeviceError = phaseEvent?.DeviceError;
         var subAction = string.IsNullOrWhiteSpace(subActionName) ? null : new ReportSubActionStateModel(
             subActionName,
-            failure?.SubActionState ?? latestStep?.State ?? "RUNNING",
-            failure?.PhaseId ?? latestStep?.PhaseId,
+            failure?.SubActionState ?? phaseEvent?.StepState ?? latestStep?.State ?? "RUNNING",
+            failure?.PhaseId ?? phaseEvent?.PhaseId ?? latestStep?.PhaseId,
             failure?.OnFail?.ToString(),
-            error is null ? null : error.DeviceCode ?? error.Code.ToString(),
-            error?.Message,
+            error is not null ? error.DeviceCode ?? error.Code.ToString()
+                : phaseDeviceError?.DeviceCode ?? phaseDeviceError?.Code.ToString(),
+            error?.Message ?? phaseDeviceError?.Message,
             error?.Detail);
         var robotState = mainState switch
         {
@@ -481,8 +493,9 @@ public sealed class ServerActionClient : IAsyncDisposable
     private sealed class ExecutionContext(ServerActionClient owner, NetworkStream stream, ActionCommand command) : IServerActionExecutionContext
     {
         public ActionCommand Command => command;
-        public ValueTask ReportRunningAsync(IReadOnlyList<ResolvedStep>? steps = null, JsonElement? evidence = null, CancellationToken cancellationToken = default) =>
-            owner.SendRunningAsync(stream, command, steps, evidence, cancellationToken);
+        public ValueTask ReportRunningAsync(IReadOnlyList<ResolvedStep>? steps = null,
+            PhaseExecutionEvent? phaseEvent = null, CancellationToken cancellationToken = default) =>
+            owner.SendRunningAsync(stream, command, steps, phaseEvent, cancellationToken);
     }
 
     /// <summary>

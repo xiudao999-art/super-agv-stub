@@ -6,7 +6,8 @@ namespace Kunling.RobotClient.Actions.ServerActions;
 public interface IServerActionExecutionContext
 {
     ActionCommand Command { get; }
-    ValueTask ReportRunningAsync(IReadOnlyList<ResolvedStep>? steps = null, JsonElement? evidence = null, CancellationToken cancellationToken = default);
+    ValueTask ReportRunningAsync(IReadOnlyList<ResolvedStep>? steps = null,
+        PhaseExecutionEvent? phaseEvent = null, CancellationToken cancellationToken = default);
 }
 
 public interface IServerActionExecutor

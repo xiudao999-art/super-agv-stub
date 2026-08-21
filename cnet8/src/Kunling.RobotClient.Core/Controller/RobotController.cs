@@ -22,6 +22,13 @@ public sealed class RobotController : IRobotOperations, IRobotExecutionProgressS
         remove => _executor.StepChanged -= value;
     }
 
+    /// <summary>转发 phase 开始、完成和失败等结构化执行事实。</summary>
+    public event EventHandler<OperationProgress>? ProgressChanged
+    {
+        add => _executor.ProgressChanged += value;
+        remove => _executor.ProgressChanged -= value;
+    }
+
     public RobotController(string robotId, IChassis chassis, IArm arm, IVision vision, IGripper gripper,
         IRfidReader rfid, IDoor door, ActionTemplateCatalog templates,
         Action<string>? templateLogger = null, IRobotEventSink? events = null)

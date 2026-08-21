@@ -110,6 +110,24 @@ public sealed record ResolvedStep(
     string? CacheSlot = null,
     string? PoseRef = null);
 
+/// <summary>
+/// ACTION_EVENT 中的单次 phase 执行事实。ResolvedSteps 继续承担累计快照，
+/// 本对象专门表达开始、完成、重试等实时变化，便于上游形成联调时间线。
+/// </summary>
+public sealed record PhaseExecutionEvent(
+    string EventType,
+    int StepSequence,
+    string PhaseId,
+    string SubAction,
+    string StepState,
+    DateTimeOffset OccurredAt,
+    int? Attempt = null,
+    DateTimeOffset? StartedAt = null,
+    DateTimeOffset? CompletedAt = null,
+    long? DurationMs = null,
+    JsonElement? Evidence = null,
+    DeviceError? DeviceError = null);
+
 public sealed record ActionError(int Code, string Message, string? DeviceCode = null,
     bool PhysicalResultKnown = true, bool Retryable = false,
     DeviceErrorCategory Category = DeviceErrorCategory.Unknown,
@@ -144,6 +162,7 @@ public sealed record ActionEvent(
     JsonElement? PhysicalResult,
     ActionError? Error,
     DateTimeOffset Timestamp,
+    PhaseExecutionEvent? PhaseEvent = null,
     ReportRobotStateModel? ReportState = null);
 
 public sealed record QueryActionRequest(string Version, string MessageType, string MessageId, string SessionId, string RobotId, string ActionInstanceId, string DeviceCommandId);

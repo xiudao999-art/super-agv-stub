@@ -82,11 +82,17 @@ public sealed class ActionTemplateExecutor(IChassis chassis, IArm arm, IVision v
     /// <summary>phase 状态发生变化时发布；订阅方不得在事件中阻塞设备执行线程。</summary>
     public event EventHandler<OperationStep>? StepChanged;
 
-    private void AddStep(List<OperationStep> steps, OperationStep step)
+    /// <summary>phase 开始、完成、重试或异常策略生效时发布结构化执行事实。</summary>
+    public event EventHandler<OperationProgress>? ProgressChanged;
+
+    private void AddStep(List<OperationStep> steps, OperationStep step, OperationProgress? progress = null)
     {
         steps.Add(step);
         StepChanged?.Invoke(this, step);
+        ProgressChanged?.Invoke(this, progress ?? CreateProgressFromStep(step));
     }
+
+    private void PublishProgress(OperationProgress progress) => ProgressChanged?.Invoke(this, progress);
 
     public async Task<ActionTemplateExecutionResult> ExecuteAsync(MainActionTemplate template,
         ActionTemplateContext context, CancellationToken ct)
@@ -115,12 +121,24 @@ public sealed class ActionTemplateExecutor(IChassis chassis, IArm arm, IVision v
             PhaseResult result = new(false, null, new DeviceError(PlatformErrorCodes.PhaseExecutionFailed, $"phase {phase.PhaseId} 尚未执行。"));
             for (var attempt = 0; attempt <= maxRetries; attempt++)
             {
+                var startedAt = DateTimeOffset.UtcNow;
+                PublishProgress(new OperationProgress(OperationProgressType.PhaseStarted,
+                    steps.Count + 1, phase.PhaseId, phase.SubAction.ToProtocolName(), "RUNNING",
+                    startedAt, attempt + 1, StartedAt: startedAt));
                 logger?.Invoke($"[TEMPLATE][{template.ActionType.ToActionType()}] phase={phase.PhaseId} " +
                     $"subAction={phase.SubAction.ToProtocolName()} attempt={attempt + 1}/{maxRetries + 1} START");
                 result = await ExecutePhaseAsync(phase, context, ct);
-                AddStep(steps, CreateStep(steps.Count + 1, phase,
-                    result.Success ? "SUCCEEDED" : attempt < maxRetries ? "RETRY_PENDING" : phase.Gate ? "GATE_FAILED" : "FAILED",
-                    new PhaseAttemptEvidence(attempt + 1, result.Evidence, result.Error)));
+                var completedAt = DateTimeOffset.UtcNow;
+                var stepState = result.Success ? "SUCCEEDED" : attempt < maxRetries
+                    ? "RETRY_PENDING" : phase.Gate ? "GATE_FAILED" : "FAILED";
+                var step = CreateStep(steps.Count + 1, phase, stepState,
+                    new PhaseAttemptEvidence(attempt + 1, result.Evidence, result.Error));
+                AddStep(steps, step, new OperationProgress(
+                    ResolveAttemptProgressType(result.Success, stepState), step.Sequence,
+                    phase.PhaseId, phase.SubAction.ToProtocolName(), stepState, completedAt,
+                    attempt + 1, startedAt, completedAt,
+                    Math.Max(0L, (long)(completedAt - startedAt).TotalMilliseconds),
+                    result.Evidence, result.Error));
                 if (result.Success) break;
                 if (phase.OnFail is PhaseFailAction.ABORT or PhaseFailAction.SKIP) break;
 
@@ -206,7 +224,15 @@ public sealed class ActionTemplateExecutor(IChassis chassis, IArm arm, IVision v
             if (!result.Success && stepEvidence is PhaseFailureEvidence)
                 AddStep(steps, CreateStep(steps.Count + 1, phase, "CAPTURED", stepEvidence, "FAILURE_EVIDENCE"));
             if (result.Success) { output = result.Evidence; completedPhaseIds.Add(phase.PhaseId); continue; }
-            if (phase.OnFail == PhaseFailAction.SKIP && !phase.Gate) continue;
+            if (phase.OnFail == PhaseFailAction.SKIP && !phase.Gate)
+            {
+                var skippedAt = DateTimeOffset.UtcNow;
+                PublishProgress(new OperationProgress(OperationProgressType.PhaseSkipped,
+                    steps.Last().Sequence, phase.PhaseId, phase.SubAction.ToProtocolName(),
+                    "SKIPPED_AFTER_FAILURE", skippedAt, Evidence: result.Evidence,
+                    DeviceError: result.Error));
+                continue;
+            }
             return new(false, steps, result.Error ?? new DeviceError(PlatformErrorCodes.PhaseExecutionFailed, $"phase {phase.PhaseId} 失败。"));
         }
         return new(true, steps, Output: output);
@@ -317,10 +343,21 @@ public sealed class ActionTemplateExecutor(IChassis chassis, IArm arm, IVision v
         {
             var replayPhase = template.Phases[index];
             if (!replayPhase.Enabled) continue;
+            var startedAt = DateTimeOffset.UtcNow;
+            PublishProgress(new OperationProgress(OperationProgressType.PhaseStarted,
+                steps.Count + 1, replayPhase.PhaseId, replayPhase.SubAction.ToProtocolName(),
+                "RETRY_FROM_RUNNING", startedAt, 1, StartedAt: startedAt));
             var replayResult = await ExecutePhaseAsync(replayPhase, context, ct);
-            AddStep(steps, CreateStep(steps.Count + 1, replayPhase,
-                replayResult.Success ? "RETRY_FROM_SUCCEEDED" : "RETRY_FROM_FAILED",
-                replayResult.Evidence ?? replayResult.Error));
+            var completedAt = DateTimeOffset.UtcNow;
+            var stepState = replayResult.Success ? "RETRY_FROM_SUCCEEDED" : "RETRY_FROM_FAILED";
+            var step = CreateStep(steps.Count + 1, replayPhase, stepState,
+                replayResult.Evidence ?? replayResult.Error);
+            AddStep(steps, step, new OperationProgress(
+                replayResult.Success ? OperationProgressType.PhaseSucceeded : OperationProgressType.PhaseFailed,
+                step.Sequence, replayPhase.PhaseId, replayPhase.SubAction.ToProtocolName(),
+                stepState, completedAt, 1, startedAt, completedAt,
+                Math.Max(0L, (long)(completedAt - startedAt).TotalMilliseconds),
+                replayResult.Evidence, replayResult.Error));
             if (!replayResult.Success) return replayResult;
         }
         return new(true, new { retryFromPhaseId, failedPhaseId });
@@ -454,6 +491,29 @@ public sealed class ActionTemplateExecutor(IChassis chassis, IArm arm, IVision v
         subActionOverride ?? phase.SubAction.ToProtocolName(), state, evidence,
         GetOptionalString(phase, "slotId"), GetOptionalString(phase, "cacheSlot"),
         GetOptionalString(phase, "poseRef"));
+
+    private static OperationProgressType ResolveAttemptProgressType(bool success, string state) => success
+        ? OperationProgressType.PhaseSucceeded
+        : state.Equals("RETRY_PENDING", StringComparison.OrdinalIgnoreCase)
+            ? OperationProgressType.PhaseRetryPending
+            : OperationProgressType.PhaseFailed;
+
+    private static OperationProgress CreateProgressFromStep(OperationStep step)
+    {
+        var type = step.State.ToUpperInvariant() switch
+        {
+            "DISABLED" or "RESUMED_SUCCEEDED" => OperationProgressType.PhaseSkipped,
+            "SUCCEEDED" or "RETRY_FROM_SUCCEEDED" => OperationProgressType.PhaseSucceeded,
+            "RETRY_PENDING" => OperationProgressType.PhaseRetryPending,
+            "VERIFY_BEFORE_RETRY" or "SATISFIED" or "RETRYFROM" or "ABORT" => OperationProgressType.PhaseVerification,
+            "HOLD" or "CANCEL" or "MANUAL" => OperationProgressType.PhasePolicyApplied,
+            "CAPTURED" => OperationProgressType.EvidenceCaptured,
+            _ => OperationProgressType.PhaseFailed
+        };
+        var now = DateTimeOffset.UtcNow;
+        return new OperationProgress(type, step.Sequence, step.PhaseId, step.SubAction,
+            step.State, now, Evidence: step.Evidence);
+    }
     private static T? GetObject<T>(PhaseActionTemplate phase, string key) where T : class
     {
         var node = phase.Parameters?[key];
